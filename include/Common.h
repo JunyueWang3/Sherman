@@ -85,7 +85,7 @@ static_assert(kRootPointerStoreOffest % sizeof(uint64_t) == 0, "XX");
 
 // lock on-chip memory
 constexpr uint64_t kLockStartAddr = 0;
-constexpr uint64_t kLockChipMemSize = 256 * 1024;
+constexpr uint64_t kLockChipMemSize = 128 * 1024;
 
 // number of locks
 // we do not use 16-bit locks, since 64-bit locks can provide enough concurrency.

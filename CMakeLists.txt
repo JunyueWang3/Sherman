@@ -5,7 +5,7 @@ project(Sherman)
 add_definitions(-DBOOST_COROUTINES_NO_DEPRECATION_WARNING)
 
 #Compiler options
-set(CMAKE_C_FLAGS "-Wall -Wno-deprecated-declarations -Wsign-compare -O3 -g")
+set(CMAKE_C_FLAGS "-Wall -Wno-deprecated-declarations -Wsign-compare -O0 -ggdb")
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -std=c++11")
 
 # Link Options

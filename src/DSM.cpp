@@ -99,7 +99,7 @@ void DSM::initRDMAConnection() {
 
   for (int i = 0; i < NR_DIRECTORY; ++i) {
     dirCon[i] =
-        new DirectoryConnection(i, (void *)baseAddr, conf.dsmSize * define::GB,
+        new DirectoryConnection(i, (void *)baseAddr,(void *)baseLockAddr, conf.dsmSize * define::GB,
                                 conf.machineNR, remoteInfo);
   }
 
@@ -333,50 +333,50 @@ bool DSM::cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
   return equal == *rdma_buffer;
 }
 
-void DSM::cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-                   uint64_t *rdma_buffer, uint64_t mask, bool signal) {
-  rdmaCompareAndSwapMask(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
-                         remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, equal,
-                         val, iCon->cacheLKey,
-                         remoteInfo[gaddr.nodeID].dsmRKey[0], mask, signal);
-}
+// void DSM::cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
+//                    uint64_t *rdma_buffer, uint64_t mask, bool signal) {
+//   rdmaCompareAndSwapMask(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//                          remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, equal,
+//                          val, iCon->cacheLKey,
+//                          remoteInfo[gaddr.nodeID].dsmRKey[0], mask, signal);
+// }
 
-bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-                        uint64_t *rdma_buffer, uint64_t mask) {
-  cas_mask(gaddr, equal, val, rdma_buffer, mask);
-  ibv_wc wc;
-  pollWithCQ(iCon->cq, 1, &wc);
+// bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
+//                         uint64_t *rdma_buffer, uint64_t mask) {
+//   cas_mask(gaddr, equal, val, rdma_buffer, mask);
+//   ibv_wc wc;
+//   pollWithCQ(iCon->cq, 1, &wc);
 
-  return (equal & mask) == (*rdma_buffer & mask);
-}
+//   return (equal & mask) == (*rdma_buffer & mask);
+// }
 
-void DSM::faa_boundary(GlobalAddress gaddr, uint64_t add_val,
-                       uint64_t *rdma_buffer, uint64_t mask, bool signal,
-                       CoroContext *ctx) {
-  if (ctx == nullptr) {
-    rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
-                            remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset,
-                            add_val, iCon->cacheLKey,
-                            remoteInfo[gaddr.nodeID].dsmRKey[0], mask, signal);
-  } else {
-    rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
-                            remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset,
-                            add_val, iCon->cacheLKey,
-                            remoteInfo[gaddr.nodeID].dsmRKey[0], mask, true,
-                            ctx->coro_id);
-    (*ctx->yield)(*ctx->master);
-  }
-}
+// void DSM::faa_boundary(GlobalAddress gaddr, uint64_t add_val,
+//                        uint64_t *rdma_buffer, uint64_t mask, bool signal,
+//                        CoroContext *ctx) {
+//   if (ctx == nullptr) {
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//                             remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset,
+//                             add_val, iCon->cacheLKey,
+//                             remoteInfo[gaddr.nodeID].dsmRKey[0], mask, signal);
+//   } else {
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//                             remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset,
+//                             add_val, iCon->cacheLKey,
+//                             remoteInfo[gaddr.nodeID].dsmRKey[0], mask, true,
+//                             ctx->coro_id);
+//     (*ctx->yield)(*ctx->master);
+//   }
+// }
 
-void DSM::faa_boundary_sync(GlobalAddress gaddr, uint64_t add_val,
-                            uint64_t *rdma_buffer, uint64_t mask,
-                            CoroContext *ctx) {
-  faa_boundary(gaddr, add_val, rdma_buffer, mask, true, ctx);
-  if (ctx == nullptr) {
-    ibv_wc wc;
-    pollWithCQ(iCon->cq, 1, &wc);
-  }
-}
+// void DSM::faa_boundary_sync(GlobalAddress gaddr, uint64_t add_val,
+//                             uint64_t *rdma_buffer, uint64_t mask,
+//                             CoroContext *ctx) {
+//   faa_boundary(gaddr, add_val, rdma_buffer, mask, true, ctx);
+//   if (ctx == nullptr) {
+//     ibv_wc wc;
+//     pollWithCQ(iCon->cq, 1, &wc);
+//   }
+// }
 
 void DSM::read_dm(char *buffer, GlobalAddress gaddr, size_t size, bool signal,
                   CoroContext *ctx) {
@@ -460,51 +460,51 @@ bool DSM::cas_dm_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
   return equal == *rdma_buffer;
 }
 
-void DSM::cas_dm_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-                      uint64_t *rdma_buffer, uint64_t mask, bool signal) {
-  rdmaCompareAndSwapMask(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
-                         remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
-                         equal, val, iCon->cacheLKey,
-                         remoteInfo[gaddr.nodeID].lockRKey[0], mask, signal);
-}
+// void DSM::cas_dm_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
+//                       uint64_t *rdma_buffer, uint64_t mask, bool signal) {
+//   rdmaCompareAndSwapMask(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//                          remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
+//                          equal, val, iCon->cacheLKey,
+//                          remoteInfo[gaddr.nodeID].lockRKey[0], mask, signal);
+// }
 
-bool DSM::cas_dm_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-                           uint64_t *rdma_buffer, uint64_t mask) {
-  cas_dm_mask(gaddr, equal, val, rdma_buffer, mask);
-  ibv_wc wc;
-  pollWithCQ(iCon->cq, 1, &wc);
+// bool DSM::cas_dm_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
+//                            uint64_t *rdma_buffer, uint64_t mask) {
+//   cas_dm_mask(gaddr, equal, val, rdma_buffer, mask);
+//   ibv_wc wc;
+//   pollWithCQ(iCon->cq, 1, &wc);
 
-  return (equal & mask) == (*rdma_buffer & mask);
-}
+//   return (equal & mask) == (*rdma_buffer & mask);
+// }
 
-void DSM::faa_dm_boundary(GlobalAddress gaddr, uint64_t add_val,
-                          uint64_t *rdma_buffer, uint64_t mask, bool signal,
-                          CoroContext *ctx) {
-  if (ctx == nullptr) {
+// void DSM::faa_dm_boundary(GlobalAddress gaddr, uint64_t add_val,
+//                           uint64_t *rdma_buffer, uint64_t mask, bool signal,
+//                           CoroContext *ctx) {
+//   if (ctx == nullptr) {
 
-    rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
-                            remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
-                            add_val, iCon->cacheLKey,
-                            remoteInfo[gaddr.nodeID].lockRKey[0], mask, signal);
-  } else {
-    rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
-                            remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
-                            add_val, iCon->cacheLKey,
-                            remoteInfo[gaddr.nodeID].lockRKey[0], mask, true,
-                            ctx->coro_id);
-    (*ctx->yield)(*ctx->master);
-  }
-}
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//                             remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
+//                             add_val, iCon->cacheLKey,
+//                             remoteInfo[gaddr.nodeID].lockRKey[0], mask, signal);
+//   } else {
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//                             remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
+//                             add_val, iCon->cacheLKey,
+//                             remoteInfo[gaddr.nodeID].lockRKey[0], mask, true,
+//                             ctx->coro_id);
+//     (*ctx->yield)(*ctx->master);
+//   }
+// }
 
-void DSM::faa_dm_boundary_sync(GlobalAddress gaddr, uint64_t add_val,
-                               uint64_t *rdma_buffer, uint64_t mask,
-                               CoroContext *ctx) {
-  faa_dm_boundary(gaddr, add_val, rdma_buffer, mask, true, ctx);
-  if (ctx == nullptr) {
-    ibv_wc wc;
-    pollWithCQ(iCon->cq, 1, &wc);
-  }
-}
+// void DSM::faa_dm_boundary_sync(GlobalAddress gaddr, uint64_t add_val,
+//                                uint64_t *rdma_buffer, uint64_t mask,
+//                                CoroContext *ctx) {
+//   faa_dm_boundary(gaddr, add_val, rdma_buffer, mask, true, ctx);
+//   if (ctx == nullptr) {
+//     ibv_wc wc;
+//     pollWithCQ(iCon->cq, 1, &wc);
+//   }
+// }
 
 uint64_t DSM::poll_rdma_cq(int count) {
   ibv_wc wc;

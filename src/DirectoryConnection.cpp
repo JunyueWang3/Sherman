@@ -2,7 +2,7 @@
 
 #include "Connection.h"
 
-DirectoryConnection::DirectoryConnection(uint16_t dirID, void *dsmPool,
+DirectoryConnection::DirectoryConnection(uint16_t dirID, void *dsmPool,void *lockPool,
                                          uint64_t dsmSize, uint32_t machineNR,
                                          RemoteConnection *remoteInfo)
     : dirID(dirID), remoteInfo(remoteInfo) {
