@@ -1,4 +1,6 @@
 #include "Rdma.h"
+#include <cerrno>
+#include <cstdio>
 
 bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
                    uint8_t devIndex) {
@@ -127,10 +129,11 @@ ibv_mr *createMemoryRegion(uint64_t mm, uint64_t mmSize, RdmaContext *ctx) {
   ibv_mr *mr = NULL;
   mr = ibv_reg_mr(ctx->pd, (void *)mm, mmSize,
                   IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
-                      IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC);
+                      IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC | IBV_ACCESS_ON_DEMAND);
 
   if (!mr) {
     Debug::notifyError("Memory registration failed");
+    Debug::notifyError("error:%s",strerror(errno));
   }
 
   return mr;

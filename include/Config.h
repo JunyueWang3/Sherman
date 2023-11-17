@@ -15,6 +15,7 @@ public:
   CacheConfig cacheConfig;
   uint32_t machineNR;
   uint64_t dsmSize; // G
+  char pm_path[MAX_ARG_SIZE]{"/mnt/pmem0/pmem_sherman"};
 
   DSMConfig(const CacheConfig &cacheConfig = CacheConfig(),
             uint32_t machineNR = 2, uint64_t dsmSize = 8)

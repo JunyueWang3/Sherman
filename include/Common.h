@@ -27,6 +27,8 @@
 #define STRUCT_OFFSET(type, field)                                             \
   (char *)&((type *)(0))->field - (char *)((type *)(0))
 
+#define MAX_ARG_SIZE 256 
+
 #define MAX_MACHINE 8
 
 #define ADD_ROUND(x, n) ((x) = ((x) + 1) % (n))

@@ -1,5 +1,6 @@
 
 #include "DSM.h"
+#include "Common.h"
 #include "Directory.h"
 #include "HugePageAlloc.h"
 
@@ -7,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <libpmem.h>
 
 thread_local int DSM::thread_id = -1;
 thread_local ThreadConnection *DSM::iCon = nullptr;
@@ -31,8 +33,26 @@ DSM *DSM::getInstance(const DSMConfig &conf) {
 
 DSM::DSM(const DSMConfig &conf)
     : conf(conf), appID(0), cache(conf.cacheConfig) {
+  
+  // pmem map
+  size_t length;
+  int is_pmem = 0;
+  
+  // For Device DAX mappings, the len argument must be, regardless of the flags, equal to either 0 or the exact size of the device.
+  baseAddr = (uint64_t)pmem_map_file(conf.pm_path, conf.dsmSize * define::GB,
+                                     PMEM_FILE_CREATE, 0666, &length, &is_pmem);
+  Debug::notifyInfo("src_buffer: %p, pmem_is_pmem: %d, %d,length = %lu\n",
+                    baseAddr, pmem_is_pmem((void *)baseAddr, length),
+                    pmem_is_pmem((void *)baseAddr, conf.dsmSize), length);
+  if (!baseAddr) {
+    Debug::notifyInfo("pmem_map_file failed for %s\n", strerror(errno));
+    Debug::notifyInfo("Map PM file failed");
+  } else {
+    Debug::notifyInfo("Mapping PM device success size %lu\n", length);
+    // conf.dsmSize = length;
+  }
 
-  baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
+  // baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
   baseLockAddr = (uint64_t)hugePageAlloc(define::kLockChipMemSize);
 
   Debug::notifyInfo("shared memory size: %dGB, 0x%lx", conf.dsmSize, baseAddr);
@@ -46,7 +66,7 @@ DSM::DSM(const DSMConfig &conf)
   }
 
   // clear up first chunk
-  memset((char *)baseAddr, 0, define::kChunkSize);
+  pmem_memset((char *)baseAddr, 0, define::kChunkSize,PMEM_F_MEM_NODRAIN);
 
   initRDMAConnection();
 
@@ -100,9 +120,9 @@ void DSM::initRDMAConnection() {
   }
 
   for (int i = 0; i < NR_DIRECTORY; ++i) {
-    dirCon[i] =
-        new DirectoryConnection(i, (void *)baseAddr,(void *)baseLockAddr, conf.dsmSize * define::GB,
-                                conf.machineNR, remoteInfo);
+    dirCon[i] = new DirectoryConnection(
+        i, (void *)baseAddr, (void *)baseLockAddr, conf.dsmSize * define::GB,
+        conf.machineNR, remoteInfo);
   }
 
   keeper = new DSMKeeper(thCon, dirCon, remoteInfo, conf.machineNR);
@@ -338,8 +358,8 @@ bool DSM::cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 // void DSM::cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 //                    uint64_t *rdma_buffer, uint64_t mask, bool signal) {
 //   rdmaCompareAndSwapMask(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
-//                          remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, equal,
-//                          val, iCon->cacheLKey,
+//                          remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset,
+//                          equal, val, iCon->cacheLKey,
 //                          remoteInfo[gaddr.nodeID].dsmRKey[0], mask, signal);
 // }
 
@@ -356,12 +376,15 @@ bool DSM::cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 //                        uint64_t *rdma_buffer, uint64_t mask, bool signal,
 //                        CoroContext *ctx) {
 //   if (ctx == nullptr) {
-//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID],
+//     (uint64_t)rdma_buffer,
 //                             remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset,
 //                             add_val, iCon->cacheLKey,
-//                             remoteInfo[gaddr.nodeID].dsmRKey[0], mask, signal);
+//                             remoteInfo[gaddr.nodeID].dsmRKey[0], mask,
+//                             signal);
 //   } else {
-//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID],
+//     (uint64_t)rdma_buffer,
 //                             remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset,
 //                             add_val, iCon->cacheLKey,
 //                             remoteInfo[gaddr.nodeID].dsmRKey[0], mask, true,
@@ -484,12 +507,15 @@ bool DSM::cas_dm_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 //                           CoroContext *ctx) {
 //   if (ctx == nullptr) {
 
-//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID],
+//     (uint64_t)rdma_buffer,
 //                             remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
 //                             add_val, iCon->cacheLKey,
-//                             remoteInfo[gaddr.nodeID].lockRKey[0], mask, signal);
+//                             remoteInfo[gaddr.nodeID].lockRKey[0], mask,
+//                             signal);
 //   } else {
-//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+//     rdmaFetchAndAddBoundary(iCon->data[0][gaddr.nodeID],
+//     (uint64_t)rdma_buffer,
 //                             remoteInfo[gaddr.nodeID].lockBase + gaddr.offset,
 //                             add_val, iCon->cacheLKey,
 //                             remoteInfo[gaddr.nodeID].lockRKey[0], mask, true,
