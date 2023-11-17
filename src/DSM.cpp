@@ -6,6 +6,7 @@
 #include "DSMKeeper.h"
 
 #include <algorithm>
+#include <cstdint>
 
 thread_local int DSM::thread_id = -1;
 thread_local ThreadConnection *DSM::iCon = nullptr;
@@ -32,6 +33,7 @@ DSM::DSM(const DSMConfig &conf)
     : conf(conf), appID(0), cache(conf.cacheConfig) {
 
   baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
+  baseLockAddr = (uint64_t)hugePageAlloc(define::kLockChipMemSize);
 
   Debug::notifyInfo("shared memory size: %dGB, 0x%lx", conf.dsmSize, baseAddr);
   Debug::notifyInfo("cache size: %dGB", conf.cacheConfig.cacheSize);

@@ -20,14 +20,23 @@ DirectoryConnection::DirectoryConnection(uint16_t dirID, void *dsmPool,void *loc
   this->dsmMR = createMemoryRegion((uint64_t)dsmPool, dsmSize, &ctx);
   this->dsmLKey = dsmMR->lkey;
 
-  // on-chip lock memory
+  // not on-chip lock memory
   if (dirID == 0) {
-    this->lockPool = (void *)define::kLockStartAddr;
+    this->lockPool = (void *)lockPool;
     this->lockSize = define::kLockChipMemSize;
-    this->lockMR = createMemoryRegionOnChip((uint64_t)this->lockPool,
+    this->lockMR = createMemoryRegion((uint64_t)this->lockPool,
                                             this->lockSize, &ctx);
     this->lockLKey = lockMR->lkey;
   }
+
+  // // on-chip lock memory
+  // if (dirID == 0) {
+  //   this->lockPool = (void *)define::kLockStartAddr;
+  //   this->lockSize = define::kLockChipMemSize;
+  //   this->lockMR = createMemoryRegionOnChip((uint64_t)this->lockPool,
+  //                                           this->lockSize, &ctx);
+  //   this->lockLKey = lockMR->lkey;
+  // }
 
   // app, RC
   for (int i = 0; i < MAX_APP_THREAD; ++i) {
