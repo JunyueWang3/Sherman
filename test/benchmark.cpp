@@ -20,7 +20,7 @@ int kThreadCount;
 int kNodeCount;
 uint64_t kKeySpace = 64 * define::MB;
 double kWarmRatio = 0.8;
-double zipfan = 0;
+double zipfan = 0.99;
 
 //////////////////// workload parameters /////////////////////
 
