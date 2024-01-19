@@ -125,6 +125,7 @@ private:
                           int coro_id);
   bool can_hand_over(GlobalAddress lock_addr);
   void releases_local_lock(GlobalAddress lock_addr);
+  bool inline check_val_valid(const Value &v);
 };
 
 class Header {
@@ -171,28 +172,9 @@ public:
   }
 } __attribute__((packed));
 
-class LeafEntry {
-public:
-  uint8_t f_version : 4;
-  Key key;
-  Value value;
-  uint8_t r_version : 4;
-
-  LeafEntry() {
-    f_version = 0;
-    r_version = 0;
-    value = kValueNull;
-    key = 0;
-  }
-} __attribute__((packed));
-
 constexpr int kInternalCardinality = (kInternalPageSize - sizeof(Header) -
                                       sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
                                      sizeof(InternalEntry);
-
-constexpr int kLeafCardinality =
-    (kLeafPageSize - sizeof(Header) - sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
-    sizeof(LeafEntry);
 
 class InternalPage {
 private:
@@ -277,51 +259,104 @@ public:
 
 } __attribute__((packed));
 
-class LeafPage {
-private:
+class LeafEntry {
+public:
+  Key key;
+  Value value;
+
+  LeafEntry() {
+    value = kValueNull;
+    key = 0;
+  }
+} __attribute__((packed));
+
+class LeafMeta {
   union {
-    uint32_t crc;
-    uint64_t embedding_lock;
+    struct {
+      uint32_t version;
+      uint8_t reserved[3];
+      uint8_t leafCounter;
+    };
+    uint64_t val;
   };
-  uint8_t front_version;
-  Header hdr;
-  LeafEntry records[kLeafCardinality];
 
-  // uint8_t padding[1];
-  uint8_t rear_version;
-
+  friend class LeafHeader;
+  friend class LeafPage;
   friend class Tree;
 
+public:
+  LeafMeta() {
+    version = 0;
+    leafCounter = 0;
+  }
+  LeafMeta(uint64_t value) { val = value; }
+  void debug() const { std::cout << "cnt=" << leafCounter << "]"; }
+} __attribute__((packed));
+
+class LeafStat {
+  Key sibling_min_key;
+  Key lowest;
+  Key highest;
+
+  friend class LeafHeader;
+  friend class LeafPage;
+  friend class Tree;
+
+public:
+  LeafStat() {
+    // init max key
+    sibling_min_key = kKeyMax;
+    lowest = kKeyMin;
+    highest = kKeyMax;
+  }
+};
+
+class LeafHeader {
+  GlobalAddress leftmost_ptr;
+  GlobalAddress sibling_ptr;
+  LeafStat leafStat;
+  uint16_t level;
+
+  friend class LeafPage;
+  friend class Tree;
+
+public:
+  LeafHeader() {
+    leftmost_ptr = GlobalAddress::Null();
+    sibling_ptr = GlobalAddress::Null();
+  }
+  void debug() const {
+    std::cout << "sibling_min_key=" << leafStat.sibling_min_key << ", "
+              << "sibling=" << sibling_ptr << ", "
+              << "level=" << (int)level << ","
+              << "range=[" << leafStat.lowest << " - " << leafStat.highest;
+  }
+}__attribute__((packed));
+
+constexpr int kleafEntryRadix = 6;
+constexpr int kLeafCardinality = 1 << kleafEntryRadix;
+constexpr int kLeafPageSize =
+    sizeof(LeafHeader) +sizeof(LeafMeta) +sizeof(uint64_t)*2 + kLeafCardinality * sizeof(LeafEntry);
+
+class LeafPage {
+private:
+  LeafHeader hdr;
+  LeafMeta leafMeta;
+  GlobalAddress shadowPtr;
+  LeafEntry records[kLeafCardinality];
+  uint32_t end_version;
+
+  friend class Tree;
+  friend class DSM;
 public:
   LeafPage(uint32_t level = 0) {
     hdr.level = level;
     records[0].value = kValueNull;
-
-    front_version = 0;
-    rear_version = 0;
-
-    embedding_lock = 0;
-  }
-
-  void set_consistent() {
-    front_version++;
-    rear_version = front_version;
-#ifdef CONFIG_ENABLE_CRC
-    this->crc =
-        CityHash32((char *)&front_version, (&rear_version) - (&front_version));
-#endif
   }
 
   bool check_consistent() const {
 
-    bool succ = true;
-#ifdef CONFIG_ENABLE_CRC
-    auto cal_crc =
-        CityHash32((char *)&front_version, (&rear_version) - (&front_version));
-    succ = cal_crc == this->crc;
-#endif
-
-    succ = succ && (rear_version == front_version);
+    bool succ = (leafMeta.version == end_version);
 
     return succ;
   }
@@ -329,10 +364,9 @@ public:
   void debug() const {
     std::cout << "LeafPage@ ";
     hdr.debug();
-    std::cout << "version: [" << (int)front_version << ", " << (int)rear_version
-              << "]" << std::endl;
+    leafMeta.debug();
   }
 
-} __attribute__((packed));
+};
 
 #endif // _TREE_H_

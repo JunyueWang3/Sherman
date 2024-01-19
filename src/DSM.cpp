@@ -1,11 +1,16 @@
 
 #include "DSM.h"
 #include "Directory.h"
+#include "GlobalAddress.h"
 #include "HugePageAlloc.h"
 
 #include "DSMKeeper.h"
+#include "Rdma.h"
+#include "Tree.h"
 
 #include <algorithm>
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
 
 thread_local int DSM::thread_id = -1;
@@ -161,6 +166,33 @@ void DSM::write_sync(const char *buffer, GlobalAddress gaddr, size_t size,
   }
 }
 
+void DSM::write_atomic(const char *buffer, GlobalAddress gaddr, size_t size,
+                bool signal, CoroContext *ctx) {
+
+  if (ctx == nullptr) {
+    rdmaWriteAtomic(iCon->data[0][gaddr.nodeID], (uint64_t)buffer,
+              remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, size,
+              iCon->cacheLKey, remoteInfo[gaddr.nodeID].dsmRKey[0], -1, signal);
+  } else {
+    rdmaWriteAtomic(iCon->data[0][gaddr.nodeID], (uint64_t)buffer,
+              remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, size,
+              iCon->cacheLKey, remoteInfo[gaddr.nodeID].dsmRKey[0], -1, true,
+              ctx->coro_id);
+    (*ctx->yield)(*ctx->master);
+  }
+}
+
+void DSM::write_atomic_sync(const char *buffer, GlobalAddress gaddr, size_t size,
+                     CoroContext *ctx) {
+  write_atomic(buffer, gaddr, size, true, ctx);
+
+  if (ctx == nullptr) {
+    ibv_wc wc;
+    pollWithCQ(iCon->cq, 1, &wc);
+  }
+}
+
+
 void DSM::fill_keys_dest(RdmaOpRegion &ror, GlobalAddress gaddr, bool is_chip) {
   ror.lkey = iCon->cacheLKey;
   if (is_chip) {
@@ -170,6 +202,74 @@ void DSM::fill_keys_dest(RdmaOpRegion &ror, GlobalAddress gaddr, bool is_chip) {
     ror.dest = remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset;
     ror.remoteRKey = remoteInfo[gaddr.nodeID].dsmRKey[0];
   }
+}
+
+void DSM::fill_rdma_op_context(RdmaOpContext &roc, GlobalAddress gaddr) {
+  roc.lkey = iCon->cacheLKey;
+
+  roc.dest = remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset;
+  roc.remoteRKey = remoteInfo[gaddr.nodeID].dsmRKey[0];
+}
+
+void DSM::write_multi(RdmaOpContext *rs, int k, bool signal, CoroContext *ctx) {
+  int node_id = -1;
+  for(int i = 0;i<k;i++){
+    GlobalAddress gaddr;
+    gaddr.val = rs[i].dest;
+    node_id = gaddr.nodeID;
+    fill_rdma_op_context(rs[i], gaddr);
+  }
+  if (ctx == nullptr) {
+    rdmaWriteMulti(iCon->data[0][node_id], rs, k, signal);
+  } else {
+    rdmaWriteMulti(iCon->data[0][node_id], rs, k, true, ctx->coro_id);
+    (*ctx->yield)(*ctx->master);
+  }
+}
+
+void DSM::write_multi_sync(RdmaOpContext *rs, int k, CoroContext *ctx) {
+  write_multi(rs, k, true, ctx);
+
+  if (ctx == nullptr) {
+    ibv_wc wc;
+    pollWithCQ(iCon->cq, 1, &wc);
+  }
+}
+
+// 仅用于分裂的写回sibling和原节点的非leafmeta部分
+void DSM::prepare_and_write_multi_sync(GlobalAddress sibling_gaddr,
+                                       char *sibling_buffer,
+                                       GlobalAddress original_gaddr,
+                                       char *original_buffer,
+                                       CoroContext *ctx) {
+  RdmaOpContext rocs[3];                                      
+  rocs[0] = {
+      .source = (uint64_t)sibling_buffer,
+      .dest = remoteInfo[sibling_gaddr.nodeID].dsmBase + sibling_gaddr.offset,
+      .size = 8,
+      .lkey = iCon->cacheLKey,
+      .remoteRKey = remoteInfo[sibling_gaddr.nodeID].dsmRKey[0],
+  };
+
+  // 写原叶子节点leafheader
+  rocs[1]  = {
+      .source = (uint64_t)original_buffer,
+      .dest = remoteInfo[original_gaddr.nodeID].dsmBase + original_gaddr.offset,
+      .size = sizeof(LeafHeader),
+      .lkey = iCon->cacheLKey,
+      .remoteRKey = remoteInfo[original_gaddr.nodeID].dsmRKey[0],
+  };
+
+  // 写原叶子节点leafmeta后的内容
+  rocs[2] = {
+      .source = (uint64_t)(original_buffer + (uint64_t)(STRUCT_OFFSET(LeafPage, shadowPtr))),
+      .dest = remoteInfo[original_gaddr.nodeID].dsmBase + original_gaddr.offset + (uint64_t)(STRUCT_OFFSET(LeafPage, shadowPtr)),
+      .size = sizeof(LeafPage) - sizeof(LeafHeader) - sizeof(LeafMeta),
+      .lkey = iCon->cacheLKey,
+      .remoteRKey = remoteInfo[original_gaddr.nodeID].dsmRKey[0],
+  };
+
+  write_multi_sync(rocs, 3);
 }
 
 void DSM::write_batch(RdmaOpRegion *rs, int k, bool signal, CoroContext *ctx) {
@@ -335,6 +435,122 @@ bool DSM::cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
   return equal == *rdma_buffer;
 }
 
+uint64_t swap_endian(uint64_t value) {
+  return ((value & 0xFF00000000000000ull) >> 56) |
+         ((value & 0x00FF000000000000ull) >> 40) |
+         ((value & 0x0000FF0000000000ull) >> 24) |
+         ((value & 0x000000FF00000000ull) >> 8) |
+         ((value & 0x00000000FF000000ull) << 8) |
+         ((value & 0x0000000000FF0000ull) << 24) |
+         ((value & 0x000000000000FF00ull) << 40) |
+         ((value & 0x00000000000000FFull) << 56);
+}
+
+void DSM::faa(GlobalAddress gaddr, uint64_t add, uint64_t *rdma_buffer,
+              bool signal, CoroContext *ctx) {
+  if (ctx == nullptr) {
+    rdmaFetchAndAdd(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+                    remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, 1,
+                    iCon->cacheLKey, remoteInfo[gaddr.nodeID].dsmRKey[0]);
+  } else {
+    // todo
+    assert(false);
+  }
+}
+
+uint64_t DSM::faa_sync(GlobalAddress gaddr, uint64_t add, uint64_t *rdma_buffer,
+                       CoroContext *ctx) {
+  faa(gaddr, add, rdma_buffer, true, ctx);
+
+  uint64_t old_value = 0;
+  if (ctx == nullptr) {
+    ibv_wc wc;
+    pollWithCQ(iCon->cq, 1, &wc);
+    if (wc.opcode == IBV_WC_FETCH_ADD) {
+      // 获取远程地址的旧值
+      old_value = swap_endian(*rdma_buffer); // 获取旧值（大小端转换）
+      std::cout << "FAA operation completed. Old value: " << old_value
+                << std::endl;
+    } else {
+      std::cerr << "Unexpected completion opcode." << std::endl;
+    }
+  }
+
+  return old_value;
+}
+
+void DSM::faa_read(RdmaOpContext &faa_roc, RdmaOpContext &read_roc,
+                   uint64_t add, bool signal, CoroContext *ctx) {
+  int node_id;
+  {
+    GlobalAddress gaddr;
+    gaddr.val = faa_roc.dest;
+    node_id = gaddr.nodeID;
+    fill_rdma_op_context(faa_roc, gaddr);
+  }
+  {
+    GlobalAddress gaddr;
+    gaddr.val = read_roc.dest;
+    fill_rdma_op_context(read_roc, gaddr);
+  }
+  if (ctx == nullptr) {
+    rdmaFaaRead(iCon->data[0][node_id], faa_roc, read_roc, 1, signal);
+    // rdmaFetchAndAdd(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
+    //                 remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, 1,
+    //                 iCon->cacheLKey, remoteInfo[gaddr.nodeID].dsmRKey[0]);
+  } else {
+    // todo
+    rdmaFaaRead(iCon->data[0][node_id], faa_roc, read_roc, 1, signal,
+                ctx->coro_id);
+    assert(false);
+  }
+}
+
+uint64_t DSM::faa_read_sync(RdmaOpContext &faa_roc, RdmaOpContext &read_roc,
+                            uint64_t add, CoroContext *ctx) {
+  faa_read(faa_roc, read_roc, add, true, ctx);
+
+  uint64_t old_value = 0;
+  if (ctx == nullptr) {
+    ibv_wc wc;
+    pollWithCQ(iCon->cq, 1, &wc);
+    if (wc.opcode == IBV_WC_RDMA_READ) {
+      // 获取远程地址的旧值
+      old_value = swap_endian(faa_roc.source); // 获取旧值（大小端转换）
+      std::cout << "FAA Read operation completed. Old value: " << old_value
+                << std::endl;
+    } else {
+      std::cerr << "Unexpected completion opcode." << std::endl;
+    }
+  }
+
+  return old_value;
+}
+
+// 只用于插入叶子节点的第一次rtt，对leaf meta做faa并读取leaf header
+uint64_t DSM::prepare_and_faa_read_sync(GlobalAddress faa_gaddr, uint64_t add,
+                                        uint64_t *faa_buffer,
+                                        GlobalAddress read_gaddr,
+                                        char *read_buffer, CoroContext *ctx) {
+  RdmaOpContext faa_roc = {
+      .source = (uint64_t)faa_buffer,
+      .dest = remoteInfo[faa_gaddr.nodeID].dsmBase + faa_gaddr.offset,
+      .size = 8,
+      .lkey = iCon->cacheLKey,
+      .remoteRKey = remoteInfo[faa_gaddr.nodeID].dsmRKey[0],
+  };
+
+  RdmaOpContext read_roc = {
+      .source = (uint64_t)read_buffer,
+      .dest = remoteInfo[read_gaddr.nodeID].dsmBase + read_gaddr.offset,
+      .size = sizeof(LeafHeader),
+      .lkey = iCon->cacheLKey,
+      .remoteRKey = remoteInfo[read_gaddr.nodeID].dsmRKey[0],
+  };
+
+  return faa_read_sync(faa_roc, read_roc, add);
+}
+
 // void DSM::cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 //                    uint64_t *rdma_buffer, uint64_t mask, bool signal) {
 //   rdmaCompareAndSwapMask(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
@@ -343,7 +559,8 @@ bool DSM::cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 //                          remoteInfo[gaddr.nodeID].dsmRKey[0], mask, signal);
 // }
 
-// bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
+// bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t
+// val,
 //                         uint64_t *rdma_buffer, uint64_t mask) {
 //   cas_mask(gaddr, equal, val, rdma_buffer, mask);
 //   ibv_wc wc;

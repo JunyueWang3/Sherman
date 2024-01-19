@@ -32,6 +32,15 @@ struct RdmaOpRegion {
   };
 };
 
+struct RdmaOpContext {
+  uint64_t source;
+  uint64_t dest;
+  uint64_t size;
+
+  uint32_t lkey;
+  uint32_t remoteRKey;
+};
+
 extern int kMaxDeviceMemorySize;
 
 struct RdmaContext {
@@ -85,7 +94,6 @@ bool modifyQPtoRTS(struct ibv_qp *qp);
 
 bool modifyUDtoRTS(struct ibv_qp *qp, RdmaContext *context);
 
-
 //// Operation.cpp
 int pollWithCQ(ibv_cq *cq, int pollNumber, struct ibv_wc *wc);
 int pollOnce(ibv_cq *cq, int pollNumber, struct ibv_wc *wc);
@@ -105,6 +113,10 @@ bool rdmaRead(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
               uint64_t wrID = 0);
 
 bool rdmaWrite(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
+               uint32_t lkey, uint32_t remoteRKey, int32_t imm = -1,
+               bool isSignaled = true, uint64_t wrID = 0);
+
+bool rdmaWriteAtomic(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
                uint32_t lkey, uint32_t remoteRKey, int32_t imm = -1,
                bool isSignaled = true, uint64_t wrID = 0);
 
@@ -128,8 +140,12 @@ bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
 void rdmaQueryQueuePair(ibv_qp *qp);
 // void checkDMSupported(struct ibv_context *ctx);
 
-
 //// specified
+bool rdmaWriteMulti(ibv_qp *qp, RdmaOpContext *ror, int k, bool isSignaled,
+                    uint64_t wrID = 0);
+bool rdmaFaaRead(ibv_qp *qp, const RdmaOpContext &faa_roc,
+                 const RdmaOpContext &read_roc, uint64_t add_val,
+                 bool isSignaled, uint64_t wrID = 0);
 bool rdmaWriteBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
                     uint64_t wrID = 0);
 bool rdmaCasRead(ibv_qp *qp, const RdmaOpRegion &cas_ror,
@@ -140,5 +156,5 @@ bool rdmaWriteFaa(ibv_qp *qp, const RdmaOpRegion &write_ror,
                   bool isSignaled, uint64_t wrID = 0);
 bool rdmaWriteCas(ibv_qp *qp, const RdmaOpRegion &write_ror,
                   const RdmaOpRegion &cas_ror, uint64_t compare, uint64_t swap,
-                  bool isSignaled, uint64_t wrID = 0);                 
+                  bool isSignaled, uint64_t wrID = 0);
 #endif

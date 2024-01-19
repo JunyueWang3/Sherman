@@ -1,3 +1,4 @@
+#include <cstdint>
 #if !defined(_RDMA_BUFFER_H_)
 #define _RDMA_BUFFER_H_
 
@@ -10,16 +11,23 @@ private:
   static const int kPageBufferCnt = 8;    // async, buffer safty
   static const int kSiblingBufferCnt = 8; // async, buffer safty
   static const int kCasBufferCnt = 8;     // async, buffer safty
+  static const int kFaaBufferCnt = 8;
+  static const int kLeafHeaderBufferCnt = 8;
 
   char *buffer;
 
+  uint64_t *faa_buffer;
   uint64_t *cas_buffer;
   uint64_t *unlock_buffer;
   uint64_t *zero_64bit;
+
+  char *leafheader_buffer;
   char *page_buffer;
   char *sibling_buffer;
   char *entry_buffer;
 
+  int leafheader_buffer_cur;
+  int faa_buffer_cur;
   int page_buffer_cur;
   int sibling_buffer_cur;
   int cas_buffer_cur;
@@ -30,6 +38,8 @@ public:
   RdmaBuffer(char *buffer) {
     set_buffer(buffer);
 
+    leafheader_buffer_cur = 0;
+    faa_buffer_cur = 0;
     page_buffer_cur = 0;
     sibling_buffer_cur = 0;
     cas_buffer_cur = 0;
@@ -41,18 +51,26 @@ public:
 
     // printf("set buffer %p\n", buffer);
 
-    kPageSize = std::max(kLeafPageSize, kInternalPageSize);
+    kPageSize = std::max((uint32_t)1080, kInternalPageSize);
     this->buffer = buffer;
-    cas_buffer = (uint64_t *)buffer;
+    faa_buffer = (uint64_t *)buffer;
+    cas_buffer = (uint64_t *)buffer + sizeof(uint64_t) * kFaaBufferCnt;
     unlock_buffer =
         (uint64_t *)((char *)cas_buffer + sizeof(uint64_t) * kCasBufferCnt);
     zero_64bit = (uint64_t *)((char *)unlock_buffer + sizeof(uint64_t));
     page_buffer = (char *)zero_64bit + sizeof(uint64_t);
     sibling_buffer = (char *)page_buffer + kPageSize * kPageBufferCnt;
-    entry_buffer = (char *)sibling_buffer + kPageSize * kSiblingBufferCnt;
+    leafheader_buffer = (char *)sibling_buffer + kPageSize * kSiblingBufferCnt;
+    entry_buffer = (char *)sibling_buffer + kLeafHeaderSize * kLeafHeaderBufferCnt;
+    
     *zero_64bit = 0;
 
     assert((char *)zero_64bit + 8 - buffer < define::kPerCoroRdmaBuf);
+  }
+
+  uint64_t *get_faa_buffer() {
+    faa_buffer_cur = (faa_buffer_cur + 1) % kFaaBufferCnt;
+    return faa_buffer + faa_buffer_cur;
   }
 
   uint64_t *get_cas_buffer() {
@@ -79,6 +97,11 @@ public:
   }
 
   char *get_entry_buffer() const { return entry_buffer; }
+
+  char *get_leafheader_buffer(){
+    leafheader_buffer_cur = (leafheader_buffer_cur + 1)%kLeafHeaderBufferCnt;
+    return leafheader_buffer + (leafheader_buffer_cur * kLeafHeaderSize);
+  }
 };
 
 #endif // _RDMA_BUFFER_H_
