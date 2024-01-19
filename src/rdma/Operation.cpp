@@ -1,4 +1,5 @@
 #include "Rdma.h"
+#include <infiniband/verbs.h>
 
 int pollWithCQ(ibv_cq *cq, int pollNumber, struct ibv_wc *wc) {
   int count = 0;
@@ -227,6 +228,39 @@ bool rdmaWrite(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
   return true;
 }
 
+bool rdmaWriteAtomic(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
+               uint32_t lkey, uint32_t remoteRKey, int32_t imm, bool isSignaled,
+               uint64_t wrID) {
+
+  struct ibv_sge sg;
+  struct ibv_send_wr wr;
+  struct ibv_send_wr *wrBad;
+
+  fillSgeWr(sg, wr, source, size, lkey);
+
+  if (imm == -1) {
+    wr.opcode = IBV_WR_ATOMIC_WRITE;
+  } else {
+    wr.imm_data = imm;
+    wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+  }
+
+  if (isSignaled) {
+    wr.send_flags = IBV_SEND_SIGNALED;
+  }
+
+  wr.wr.rdma.remote_addr = dest;
+  wr.wr.rdma.rkey = remoteRKey;
+  wr.wr_id = wrID;
+
+  if (ibv_post_send(qp, &wr, &wrBad) != 0) {
+    Debug::notifyError("Send with RDMA_WRITE_ATOMIC failed.");
+    sleep(10);
+    return false;
+  }
+  return true;
+}
+
 // RC & UC
 bool rdmaFetchAndAdd(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t add,
                      uint32_t lkey, uint32_t remoteRKey) {
@@ -245,6 +279,39 @@ bool rdmaFetchAndAdd(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t add,
 
   if (ibv_post_send(qp, &wr, &wrBad)) {
     Debug::notifyError("Send with ATOMIC_FETCH_AND_ADD failed.");
+    return false;
+  }
+  return true;
+}
+
+bool rdmaFaaRead(ibv_qp *qp, const RdmaOpContext &faa_roc,
+                  const RdmaOpContext &read_roc, uint64_t add_val,
+                  bool isSignaled, uint64_t wrID) {
+
+  struct ibv_sge sg[2];
+  struct ibv_send_wr wr[2];
+  struct ibv_send_wr *wrBad;
+
+  fillSgeWr(sg[0], wr[0], faa_roc.source, faa_roc.size, faa_roc.lkey);
+  wr[0].opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
+  wr[0].wr.rdma.remote_addr = faa_roc.dest;
+  wr[0].wr.rdma.rkey = faa_roc.remoteRKey;
+  wr[0].next = &wr[1];
+
+  fillSgeWr(sg[1], wr[1], read_roc.source, 8, read_roc.lkey);
+  wr[1].opcode = IBV_WR_RDMA_READ;
+  wr[1].wr.atomic.remote_addr = read_roc.dest;
+  wr[1].wr.atomic.rkey = read_roc.remoteRKey;
+  wr[1].wr.atomic.compare_add = add_val;
+  wr[1].wr_id = wrID;
+
+  if (isSignaled) {
+    wr[1].send_flags |= IBV_SEND_SIGNALED;
+  }
+
+  if (ibv_post_send(qp, &wr[0], &wrBad)) {
+    Debug::notifyError("Send with Faa Read failed.");
+    sleep(10);
     return false;
   }
   return true;
@@ -347,6 +414,36 @@ bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
 //   return true;
 // }
 
+bool rdmaWriteMulti(ibv_qp *qp, RdmaOpContext *roc, int k, bool isSignaled,
+                    uint64_t wrID) {
+
+  struct ibv_sge sg[kOroMax];
+  struct ibv_send_wr wr[kOroMax];
+  struct ibv_send_wr *wrBad;
+
+  for (int i = 0; i < k; ++i) {
+    fillSgeWr(sg[i], wr[i], roc[i].source, roc[i].size, roc[i].lkey);
+
+    wr[i].next = (i == k - 1) ? NULL : &wr[i + 1];
+
+    wr[i].opcode = IBV_WR_RDMA_WRITE;
+
+    if (i == k - 1 && isSignaled) {
+      wr[i].send_flags = IBV_SEND_SIGNALED;
+    }
+
+    wr[i].wr.rdma.remote_addr = roc[i].dest;
+    wr[i].wr.rdma.rkey = roc[i].remoteRKey;
+    wr[i].wr_id = wrID;
+  }
+
+  if (ibv_post_send(qp, &wr[0], &wrBad) != 0) {
+    Debug::notifyError("Send with RDMA_WRITE multi failed.");
+    sleep(10);
+    return false;
+  }
+  return true;
+}
 
 bool rdmaWriteBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
                     uint64_t wrID) {

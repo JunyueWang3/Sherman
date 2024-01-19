@@ -2,6 +2,7 @@
 #define __DSM_H__
 
 #include <atomic>
+#include <cstddef>
 
 #include "Cache.h"
 #include "Config.h"
@@ -9,6 +10,7 @@
 #include "DSMKeeper.h"
 #include "GlobalAddress.h"
 #include "LocalAllocator.h"
+#include "Rdma.h"
 #include "RdmaBuffer.h"
 
 class DSMKeeper;
@@ -42,6 +44,21 @@ public:
   void write_sync(const char *buffer, GlobalAddress gaddr, size_t size,
                   CoroContext *ctx = nullptr);
 
+  void write_atomic(const char *buffer, GlobalAddress gaddr, size_t size,
+             bool signal = true, CoroContext *ctx = nullptr);
+  void write_atomic_sync(const char *buffer, GlobalAddress gaddr, size_t size,
+                  CoroContext *ctx = nullptr);
+
+  void write_multi(RdmaOpContext *rs, int k, bool signal,
+                   CoroContext *ctx = nullptr);
+  void write_multi_sync(RdmaOpContext *rs, int k, CoroContext *ctx = nullptr);
+
+  void prepare_and_write_multi_sync(GlobalAddress sibling_gaddr,
+                                    char *sibling_buffer,
+                                    GlobalAddress original_gaddr,
+                                    char *original_buffer,
+                                    CoroContext *ctx = nullptr);
+
   void write_batch(RdmaOpRegion *rs, int k, bool signal = true,
                    CoroContext *ctx = nullptr);
   void write_batch_sync(RdmaOpRegion *rs, int k, CoroContext *ctx = nullptr);
@@ -62,6 +79,23 @@ public:
            CoroContext *ctx = nullptr);
   bool cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
                 uint64_t *rdma_buffer, CoroContext *ctx = nullptr);
+
+  void faa(GlobalAddress gaddr, uint64_t add, uint64_t *rdma_buffer,
+           bool signal, CoroContext *ctx);
+  uint64_t faa_sync(GlobalAddress gaddr, uint64_t add, uint64_t *rdma_buffer,
+                    CoroContext *ctx = nullptr);
+
+  void faa_read(RdmaOpContext &faa_roc, RdmaOpContext &read_roc, uint64_t add,
+                bool signal, CoroContext *ctx = nullptr);
+
+  uint64_t faa_read_sync(RdmaOpContext &faa_roc, RdmaOpContext &read_roc,
+                         uint64_t add, CoroContext *ctx = nullptr);
+
+  uint64_t prepare_and_faa_read_sync(GlobalAddress faa_gaddr, uint64_t add,
+                                     uint64_t *faa_buffer,
+                                     GlobalAddress read_gaddr,
+                                     char *read_buffer,
+                                     CoroContext *ctx = nullptr);
 
   void cas_read(RdmaOpRegion &cas_ror, RdmaOpRegion &read_ror, uint64_t equal,
                 uint64_t val, bool signal = true, CoroContext *ctx = nullptr);
@@ -143,6 +177,7 @@ private:
 
   void initRDMAConnection();
   void fill_keys_dest(RdmaOpRegion &ror, GlobalAddress addr, bool is_chip);
+  void fill_rdma_op_context(RdmaOpContext &roc, GlobalAddress gaddr);
 
   DSMConfig conf;
   std::atomic_int appID;

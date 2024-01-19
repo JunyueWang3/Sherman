@@ -1,10 +1,15 @@
 #include "Tree.h"
+#include "Common.h"
+#include "GlobalAddress.h"
 #include "IndexCache.h"
+#include "Rdma.h"
 #include "RdmaBuffer.h"
 #include "Timer.h"
 
 #include <algorithm>
+#include <cassert>
 #include <city.h>
+#include <infiniband/verbs.h>
 #include <iostream>
 #include <queue>
 #include <utility>
@@ -25,6 +30,7 @@ thread_local Timer timer;
 thread_local std::queue<uint16_t> hot_wait_queue;
 
 Tree::Tree(DSM *dsm, uint16_t tree_id) : dsm(dsm), tree_id(tree_id) {
+  assert(sizeof(LeafHeader) == kLeafHeaderSize);
 
   for (int i = 0; i < dsm->getClusterSize(); ++i) {
     local_locks[i] = new LocalLockNode[define::kNumOfLock];
@@ -48,7 +54,8 @@ Tree::Tree(DSM *dsm, uint16_t tree_id) : dsm(dsm), tree_id(tree_id) {
   auto root_addr = dsm->alloc(kLeafPageSize);
   auto root_page = new (page_buffer) LeafPage;
 
-  root_page->set_consistent();
+  // wjy
+  // root_page->set_consistent();
   dsm->write_sync(page_buffer, root_addr, kLeafPageSize);
 
   auto cas_buffer = (dsm->get_rbuf(0)).get_cas_buffer();
@@ -458,6 +465,15 @@ next:
   }
 }
 
+bool inline Tree::check_val_valid(const Value &v) {
+  // check delete_bit and finish_bit
+  if ((v & 0x1) == 1 && (v & 0x2) == 0) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
 uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
                            CoroContext *cxt, int coro_id) {
 
@@ -468,7 +484,7 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
   result.clear();
   leaves.clear();
   index_cache->search_range_from_cache(from, to, result);
-  
+
   // FIXME: here, we assume all innernal nodes are cached in compute node
   if (result.empty()) {
     return 0;
@@ -508,7 +524,7 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
         auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
         for (int i = 0; i < kLeafCardinality; ++i) {
           auto &r = page->records[i];
-          if (r.value != kValueNull && r.f_version == r.r_version) {
+          if (r.value != kValueNull && check_val_valid(r.value)) {
             if (r.key >= from && r.key <= to) {
               value_buffer[counter++] = r.value;
             }
@@ -527,7 +543,7 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
       auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
       for (int i = 0; i < kLeafCardinality; ++i) {
         auto &r = page->records[i];
-        if (r.value != kValueNull && r.f_version == r.r_version) {
+        if (r.value != kValueNull && check_val_valid(r.value)) {
           if (r.key >= from && r.key <= to) {
             value_buffer[counter++] = r.value;
           }
@@ -617,17 +633,17 @@ re_read:
       goto re_read;
     }
 
-    if (from_cache &&
-        (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
+    if (from_cache && (k < page->hdr.leafStat.lowest ||
+                       k >= page->hdr.leafStat.highest)) { // cache is stale
       return false;
     }
 
     assert(result.level == 0);
-    if (k >= page->hdr.highest) { // should turn right
+    if (k >= page->hdr.leafStat.highest) { // should turn right
       result.slibing = page->hdr.sibling_ptr;
       return true;
     }
-    if (k < page->hdr.lowest) {
+    if (k < page->hdr.leafStat.lowest) {
       assert(false);
       return false;
     }
@@ -689,8 +705,9 @@ void Tree::leaf_page_search(LeafPage *page, const Key &k,
 
   for (int i = 0; i < kLeafCardinality; ++i) {
     auto &r = page->records[i];
-    if (r.key == k && r.value != kValueNull && r.f_version == r.r_version) {
-      result.val = r.value;
+    if (r.key == k && r.value != kValueNull && check_val_valid(r.value)) {
+      // remove delete bit and finish bit
+      result.val = r.value >> 2;
       break;
     }
   }
@@ -829,162 +846,164 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
                            const Value &v, GlobalAddress root, int level,
                            CoroContext *cxt, int coro_id, bool from_cache) {
 
-  uint64_t lock_index =
-      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
-
-  GlobalAddress lock_addr;
-
-#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
-  lock_addr = page_addr;
-#else
-  lock_addr.nodeID = page_addr.nodeID;
-  lock_addr.offset = lock_index * sizeof(uint64_t);
-#endif
-
   auto &rbuf = dsm->get_rbuf(coro_id);
-  uint64_t *cas_buffer = rbuf.get_cas_buffer();
+  uint64_t *faa_buffer = rbuf.get_faa_buffer();
   auto page_buffer = rbuf.get_page_buffer();
+  auto leafheader_buffer = rbuf.get_leafheader_buffer();
 
-  auto tag = dsm->getThreadTag();
-  assert(tag != 0);
+faa_retry:
+  LeafMeta old_leafmeta = LeafMeta(dsm->prepare_and_faa_read_sync(
+      GADD(page_addr, STRUCT_OFFSET(LeafPage, leafMeta)), 1, faa_buffer,
+      GADD(page_addr, STRUCT_OFFSET(LeafPage, hdr)), leafheader_buffer));
 
-  lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
-                     lock_addr, tag, cxt, coro_id);
+  auto leafheader = (LeafHeader *)leafheader_buffer;
 
-  auto page = (LeafPage *)page_buffer;
+  bool leaf_is_full = old_leafmeta.leafCounter & (1 << kleafEntryRadix);
+  uint8_t entry_cnt = old_leafmeta.leafCounter & 0x3f;
 
-  assert(page->hdr.level == level);
-  assert(page->check_consistent());
+  if (leaf_is_full) {
+    goto faa_retry;
+  } else if (entry_cnt == 0x3f) {
+    // split
+    // 分裂流程
+    // 1 先读leaf page
+    // 2 检查有效性，排序，分裂
+    // 3 写入分裂后的新sibling节点和一个仅包含原节点分裂后的所有entry项的shadow
+    // leaf，同时修改shadow leaf ptr 4 再原子修改原节点的sibling
+    // ptr为新sibling节点地址 5 接着修改原节点的数据(leafmeta除外) 6
+    // 最后原子修改原叶子节点的元数据leaf meta完成叶子节点分裂 7
+    // 递归向上修改内部节点 不考虑内部节点共五次rtt
 
-  if (from_cache &&
-      (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
-    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
-    return false;
-  }
+    // 简化版本分裂流程（不写入shadow leaf，不保证崩溃一致性）
+    // 1 先读leaf page
+    // 2 检查有效性，排序，分裂
+    // 3 写入分裂后的sibling节点，以及原节点除leaf meta之外的数据
+    // 4 原子修改leafmeta，完成分裂
+    // 5 递归向上修改内部节点
+    // 不考虑内部节点共三次rtt
 
-  if (k >= page->hdr.highest) {
+    dsm->read_sync(page_buffer, page_addr, kLeafPageSize);
+    auto leafPage = (LeafPage *)page_buffer;
+    // 将当前kv先插入
+    leafPage->records[kLeafCardinality - 1].key = k;
+    leafPage->records[kLeafCardinality - 1].value = (v << 2) + 1;
 
-    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
-    assert(page->hdr.sibling_ptr != GlobalAddress::Null());
-    this->leaf_page_store(page->hdr.sibling_ptr, k, v, root, level, cxt,
-                          coro_id);
-    return true;
-  }
-  assert(k >= page->hdr.lowest);
+    // 将无效的 entry 移动到数组的末尾，并返回第一个无效 entry 的迭代器
+    auto it =
+        std::partition(leafPage->records, leafPage->records + kLeafCardinality,
+                       [](const LeafEntry &e) {
+                         return ((e.value & 0b01) == 1) && ((e.value & 0b10) == 0);
+                       });
 
-  int cnt = 0;
-  int empty_index = -1;
-  char *update_addr = nullptr;
-  for (int i = 0; i < kLeafCardinality; ++i) {
-
-    auto &r = page->records[i];
-    if (r.value != kValueNull) {
-      cnt++;
-      if (r.key == k) {
-        r.value = v;
-        r.f_version++;
-        r.r_version = r.f_version;
-        update_addr = (char *)&r;
-        break;
-      }
-    } else if (empty_index == -1) {
-      empty_index = i;
-    }
-  }
-
-  assert(cnt != kLeafCardinality);
-
-  if (update_addr == nullptr) { // insert new item
-    if (empty_index == -1) {
-      printf("%d cnt\n", cnt);
-      assert(false);
-    }
-
-    auto &r = page->records[empty_index];
-    r.key = k;
-    r.value = v;
-    r.f_version++;
-    r.r_version = r.f_version;
-
-    update_addr = (char *)&r;
-
-    cnt++;
-  }
-
-  bool need_split = cnt == kLeafCardinality;
-  if (!need_split) {
-    assert(update_addr);
-    write_page_and_unlock(
-        update_addr, GADD(page_addr, (update_addr - (char *)page)),
-        sizeof(LeafEntry), cas_buffer, lock_addr, tag, cxt, coro_id, false);
-
-    return true;
-  } else {
+    // 对有效部分进行排序
     std::sort(
-        page->records, page->records + kLeafCardinality,
+        leafPage->records, it,
         [](const LeafEntry &a, const LeafEntry &b) { return a.key < b.key; });
-  }
 
-  Key split_key;
-  GlobalAddress sibling_addr;
-  if (need_split) { // need split
+    // 计算有效 entry 的数量
+    int validCount = it - leafPage->records;
+
+    // 将无效的 entry 的 key 和 valid 置为 0
+    std::for_each(it, leafPage->records + kLeafCardinality, [](LeafEntry &e) {
+      e.key = 0;
+      e.value = 0;
+    });
+
+    Key split_key;
+    GlobalAddress sibling_addr;
+
     sibling_addr = dsm->alloc(kLeafPageSize);
     auto sibling_buf = rbuf.get_sibling_buffer();
 
-    auto sibling = new (sibling_buf) LeafPage(page->hdr.level);
+    auto sibling = new (sibling_buf) LeafPage(leafPage->hdr.level);
 
     // std::cout << "addr " <<  sibling_addr << " | level " <<
     // (int)(page->hdr.level) << std::endl;
 
-    int m = cnt / 2;
-    split_key = page->records[m].key;
-    assert(split_key > page->hdr.lowest);
-    assert(split_key < page->hdr.highest);
+    int m = validCount / 2;
+    split_key = leafPage->records[m].key;
+    assert(split_key > leafPage->hdr.leafStat.lowest);
+    assert(split_key < leafPage->hdr.leafStat.highest);
 
-    for (int i = m; i < cnt; ++i) { // move
-      sibling->records[i - m].key = page->records[i].key;
-      sibling->records[i - m].value = page->records[i].value;
-      page->records[i].key = 0;
-      page->records[i].value = kValueNull;
+    for (int i = m; i < validCount; ++i) { // move
+      sibling->records[i - m].key = leafPage->records[i].key;
+      sibling->records[i - m].value = leafPage->records[i].value;
+      leafPage->records[i].key = 0;
+      leafPage->records[i].value = kValueNull;
     }
-    page->hdr.last_index -= (cnt - m);
-    sibling->hdr.last_index += (cnt - m);
 
-    sibling->hdr.lowest = split_key;
-    sibling->hdr.highest = page->hdr.highest;
-    page->hdr.highest = split_key;
+    sibling->hdr.leafStat.lowest = split_key;
+    sibling->hdr.leafStat.highest = leafPage->hdr.leafStat.highest;
+    leafPage->hdr.leafStat.highest = split_key;
 
     // link
-    sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
-    page->hdr.sibling_ptr = sibling_addr;
+    sibling->hdr.sibling_ptr = leafPage->hdr.sibling_ptr;
+    leafPage->hdr.sibling_ptr = sibling_addr;
 
-    sibling->set_consistent();
-    dsm->write_sync(sibling_buf, sibling_addr, kLeafPageSize, cxt);
-  }
+    leafPage->leafMeta.version++;
+    leafPage->end_version = leafPage->leafMeta.version;
+    leafPage->shadowPtr = GlobalAddress::Null();
 
-  page->set_consistent();
+    // 写sibling以及原节点
+    dsm->prepare_and_write_multi_sync(sibling_addr, sibling_buf, page_addr,
+                                      page_buffer);
 
-  write_page_and_unlock(page_buffer, page_addr, kLeafPageSize, cas_buffer,
-                        lock_addr, tag, cxt, coro_id, need_split);
+    // 原子修改leafmeta
+    dsm->write_atomic_sync(
+        page_buffer + (uint64_t)(STRUCT_OFFSET(LeafPage, leafMeta)),
+        GADD(page_addr, STRUCT_OFFSET(LeafPage, leafMeta)), sizeof(LeafMeta));
 
-  if (!need_split)
-    return true;
+    // 向上插入
+    if (root == page_addr) { // update root
+      if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
+                          cxt, coro_id)) {
+        return true;
+      }
+    }
 
-  if (root == page_addr) { // update root
-    if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
-                        cxt, coro_id)) {
+    auto up_level = path_stack[coro_id][level + 1];
+
+    if (up_level != GlobalAddress::Null()) {
+      internal_page_store(up_level, split_key, sibling_addr, root, level + 1,
+                          cxt, coro_id);
+    } else {
+      assert(from_cache);
+      insert_internal(split_key, sibling_addr, cxt, coro_id, level + 1);
+    }
+  } else {
+    // insert
+    // 需要判断是不是对的叶子节点（通过lowest highest)
+    // 大于highest去sibling插入，不会存在小于lowest
+
+    // todo 还不知道level是干嘛的
+    assert(leafheader->level == level);
+
+    if (from_cache && (k < leafheader->leafStat.lowest ||
+                       k >= leafheader->leafStat.highest)) { // cache is stale
+      // 缓存失效
+      return false;
+    }
+    if (k >= leafheader->leafStat.highest) {
+      // 去sibling节点插入
+      assert(leafheader->sibling_ptr != GlobalAddress::Null());
+      this->leaf_page_store(leafheader->sibling_ptr, k, v, root, level, cxt,
+                            coro_id);
       return true;
     }
-  }
+    assert(k >= leafheader->leafStat.lowest);
 
-  auto up_level = path_stack[coro_id][level + 1];
-
-  if (up_level != GlobalAddress::Null()) {
-    internal_page_store(up_level, split_key, sibling_addr, root, level + 1, cxt,
-                        coro_id);
-  } else {
-    assert(from_cache);
-    insert_internal(split_key, sibling_addr, cxt, coro_id, level + 1);
+    // 在本节点插入
+    auto entry_buffer = (LeafEntry *)rbuf.get_entry_buffer();
+    entry_buffer->key = k;
+    // 加上finish bit
+    entry_buffer->value = (v << 2) + 1;
+    // 写远程entry
+    assert(entry_cnt + 1 < kLeafCardinality);
+    dsm->write_sync(
+        (char *)entry_buffer,
+        GADD(page_addr, STRUCT_OFFSET(LeafPage, records) + entry_cnt + 1),
+        sizeof(LeafEntry));
+    return true;
   }
 
   return true;
@@ -992,66 +1011,44 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
 bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                          CoroContext *cxt, int coro_id, bool from_cache) {
-  uint64_t lock_index =
-      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
-
-  GlobalAddress lock_addr;
-
-#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
-  lock_addr = page_addr;
-#else
-  lock_addr.nodeID = page_addr.nodeID;
-  lock_addr.offset = lock_index * sizeof(uint64_t);
-#endif
+  // 只需要读page
+  // 找到对应k，修改delete位即可
+  // 写回该entry(不需要原子写)
 
   auto &rbuf = dsm->get_rbuf(coro_id);
-  uint64_t *cas_buffer = rbuf.get_cas_buffer();
   auto page_buffer = rbuf.get_page_buffer();
-
-  auto tag = dsm->getThreadTag();
-  assert(tag != 0);
-
-  lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
-                     lock_addr, tag, cxt, coro_id);
+  
+  dsm->read_sync(page_buffer, page_addr, kLeafPageSize);
 
   auto page = (LeafPage *)page_buffer;
-
   assert(page->hdr.level == level);
   assert(page->check_consistent());
 
   if (from_cache &&
-      (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
-    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+      (k < page->hdr.leafStat.lowest || k >= page->hdr.leafStat.highest)) { // cache is stale
     return false;
   }
 
-  if (k >= page->hdr.highest) {
-    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+  if (k >= page->hdr.leafStat.highest) {
     assert(page->hdr.sibling_ptr != GlobalAddress::Null());
     this->leaf_page_del(page->hdr.sibling_ptr, k, level, cxt, coro_id);
     return true;
   }
 
-  assert(k >= page->hdr.lowest);
+  assert(k >= page->hdr.leafStat.lowest);
 
   char *update_addr = nullptr;
   for (int i = 0; i < kLeafCardinality; ++i) {
     auto &r = page->records[i];
-    if (r.key == k && r.value != kValueNull) {
-      r.value = kValueNull;
-      r.f_version++;
-      r.r_version = r.f_version;
+    if (r.key == k && check_val_valid(r.value)) {
+      r.value |= 0b10;
       update_addr = (char *)&r;
       break;
     }
   }
 
   if (update_addr) {
-    write_page_and_unlock(
-        update_addr, GADD(page_addr, (update_addr - (char *)page)),
-        sizeof(LeafEntry), cas_buffer, lock_addr, tag, cxt, coro_id, false);
-  } else {
-    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, false);
+    dsm->write_sync(update_addr, GADD(page_addr,(update_addr-(char*)page)), sizeof(LeafEntry));
   }
   return true;
 }
