@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <ios>
 
 thread_local int DSM::thread_id = -1;
 thread_local ThreadConnection *DSM::iCon = nullptr;
@@ -245,7 +246,7 @@ void DSM::prepare_and_write_multi_sync(GlobalAddress sibling_gaddr,
   RdmaOpContext rocs[3];                                      
   rocs[0] = {
       .source = (uint64_t)sibling_buffer,
-      .dest = remoteInfo[sibling_gaddr.nodeID].dsmBase + sibling_gaddr.offset,
+      .dest = sibling_gaddr,
       .size = 8,
       .lkey = iCon->cacheLKey,
       .remoteRKey = remoteInfo[sibling_gaddr.nodeID].dsmRKey[0],
@@ -254,7 +255,7 @@ void DSM::prepare_and_write_multi_sync(GlobalAddress sibling_gaddr,
   // 写原叶子节点leafheader
   rocs[1]  = {
       .source = (uint64_t)original_buffer,
-      .dest = remoteInfo[original_gaddr.nodeID].dsmBase + original_gaddr.offset,
+      .dest = original_gaddr,
       .size = sizeof(LeafHeader),
       .lkey = iCon->cacheLKey,
       .remoteRKey = remoteInfo[original_gaddr.nodeID].dsmRKey[0],
@@ -263,7 +264,7 @@ void DSM::prepare_and_write_multi_sync(GlobalAddress sibling_gaddr,
   // 写原叶子节点leafmeta后的内容
   rocs[2] = {
       .source = (uint64_t)(original_buffer + (uint64_t)(STRUCT_OFFSET(LeafPage, shadowPtr))),
-      .dest = remoteInfo[original_gaddr.nodeID].dsmBase + original_gaddr.offset + (uint64_t)(STRUCT_OFFSET(LeafPage, shadowPtr)),
+      .dest = GADD(original_gaddr ,(uint64_t)(STRUCT_OFFSET(LeafPage, shadowPtr))),
       .size = sizeof(LeafPage) - sizeof(LeafHeader) - sizeof(LeafMeta),
       .lkey = iCon->cacheLKey,
       .remoteRKey = remoteInfo[original_gaddr.nodeID].dsmRKey[0],
@@ -516,8 +517,8 @@ uint64_t DSM::faa_read_sync(RdmaOpContext &faa_roc, RdmaOpContext &read_roc,
     pollWithCQ(iCon->cq, 1, &wc);
     if (wc.opcode == IBV_WC_RDMA_READ) {
       // 获取远程地址的旧值
-      old_value = swap_endian(faa_roc.source); // 获取旧值（大小端转换）
-      std::cout << "FAA Read operation completed. Old value: " << old_value
+      old_value = swap_endian(*(uint64_t *)faa_roc.source); // 获取旧值（大小端转换）
+      std::cout << "FAA Read operation completed. Old value: "<<  std::hex << old_value
                 << std::endl;
     } else {
       std::cerr << "Unexpected completion opcode." << std::endl;
@@ -534,7 +535,7 @@ uint64_t DSM::prepare_and_faa_read_sync(GlobalAddress faa_gaddr, uint64_t add,
                                         char *read_buffer, CoroContext *ctx) {
   RdmaOpContext faa_roc = {
       .source = (uint64_t)faa_buffer,
-      .dest = remoteInfo[faa_gaddr.nodeID].dsmBase + faa_gaddr.offset,
+      .dest = faa_gaddr,
       .size = 8,
       .lkey = iCon->cacheLKey,
       .remoteRKey = remoteInfo[faa_gaddr.nodeID].dsmRKey[0],
@@ -542,7 +543,7 @@ uint64_t DSM::prepare_and_faa_read_sync(GlobalAddress faa_gaddr, uint64_t add,
 
   RdmaOpContext read_roc = {
       .source = (uint64_t)read_buffer,
-      .dest = remoteInfo[read_gaddr.nodeID].dsmBase + read_gaddr.offset,
+      .dest = read_gaddr,
       .size = sizeof(LeafHeader),
       .lkey = iCon->cacheLKey,
       .remoteRKey = remoteInfo[read_gaddr.nodeID].dsmRKey[0],

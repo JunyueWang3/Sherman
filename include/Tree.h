@@ -273,9 +273,9 @@ public:
 class LeafMeta {
   union {
     struct {
-      uint32_t version;
-      uint8_t reserved[3];
       uint8_t leafCounter;
+      uint8_t reserved[3];
+      uint32_t version;
     };
     uint64_t val;
   };
@@ -286,8 +286,7 @@ class LeafMeta {
 
 public:
   LeafMeta() {
-    version = 0;
-    leafCounter = 0;
+    val = 0;
   }
   LeafMeta(uint64_t value) { val = value; }
   void debug() const { std::cout << "cnt=" << leafCounter << "]"; }
@@ -315,7 +314,7 @@ class LeafHeader {
   GlobalAddress leftmost_ptr;
   GlobalAddress sibling_ptr;
   LeafStat leafStat;
-  uint16_t level;
+  uint32_t level;
 
   friend class LeafPage;
   friend class Tree;
@@ -324,6 +323,7 @@ public:
   LeafHeader() {
     leftmost_ptr = GlobalAddress::Null();
     sibling_ptr = GlobalAddress::Null();
+    level = 0;
   }
   void debug() const {
     std::cout << "sibling_min_key=" << leafStat.sibling_min_key << ", "

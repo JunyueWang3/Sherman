@@ -294,17 +294,18 @@ bool rdmaFaaRead(ibv_qp *qp, const RdmaOpContext &faa_roc,
 
   fillSgeWr(sg[0], wr[0], faa_roc.source, faa_roc.size, faa_roc.lkey);
   wr[0].opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
-  wr[0].wr.rdma.remote_addr = faa_roc.dest;
-  wr[0].wr.rdma.rkey = faa_roc.remoteRKey;
+  wr[0].wr.atomic.remote_addr = faa_roc.dest;
+  wr[0].wr.atomic.rkey = faa_roc.remoteRKey;
+  wr[0].wr.atomic.compare_add = add_val;
   wr[0].next = &wr[1];
 
-  fillSgeWr(sg[1], wr[1], read_roc.source, 8, read_roc.lkey);
+  fillSgeWr(sg[1], wr[1], read_roc.source, read_roc.size, read_roc.lkey);
   wr[1].opcode = IBV_WR_RDMA_READ;
-  wr[1].wr.atomic.remote_addr = read_roc.dest;
-  wr[1].wr.atomic.rkey = read_roc.remoteRKey;
-  wr[1].wr.atomic.compare_add = add_val;
+  wr[1].wr.rdma.remote_addr = read_roc.dest;
+  wr[1].wr.rdma.rkey = read_roc.remoteRKey;
   wr[1].wr_id = wrID;
 
+  wr[1].send_flags |= IBV_SEND_FENCE;
   if (isSignaled) {
     wr[1].send_flags |= IBV_SEND_SIGNALED;
   }

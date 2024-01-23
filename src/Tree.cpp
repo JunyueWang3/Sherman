@@ -54,8 +54,6 @@ Tree::Tree(DSM *dsm, uint16_t tree_id) : dsm(dsm), tree_id(tree_id) {
   auto root_addr = dsm->alloc(kLeafPageSize);
   auto root_page = new (page_buffer) LeafPage;
 
-  // wjy
-  // root_page->set_consistent();
   dsm->write_sync(page_buffer, root_addr, kLeafPageSize);
 
   auto cas_buffer = (dsm->get_rbuf(0)).get_cas_buffer();
@@ -80,6 +78,7 @@ void Tree::print_verbose() {
     std::cout << "Internal Page size: " << sizeof(InternalPage) << " ["
               << kInternalPageSize << "]" << std::endl;
     std::cout << "Internal per Page: " << kInternalCardinality << std::endl;
+    std::cout << "Leaf Header size: " << sizeof(LeafHeader) << std::endl;
     std::cout << "Leaf Page size: " << sizeof(LeafPage) << " [" << kLeafPageSize
               << "]" << std::endl;
     std::cout << "Leaf per Page: " << kLeafCardinality << std::endl;
@@ -610,7 +609,7 @@ bool Tree::page_search(GlobalAddress page_addr, const Key &k,
                        SearchResult &result, CoroContext *cxt, int coro_id,
                        bool from_cache) {
   auto page_buffer = (dsm->get_rbuf(coro_id)).get_page_buffer();
-  auto header = (Header *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
+  auto header = (LeafHeader *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
 
   int counter = 0;
 re_read:
@@ -621,7 +620,10 @@ re_read:
   dsm->read_sync(page_buffer, page_addr, kLeafPageSize, cxt);
 
   memset(&result, 0, sizeof(result));
+
+  //wjy 判断叶子节点方式要改
   result.is_leaf = header->leftmost_ptr == GlobalAddress::Null();
+
   result.level = header->level;
   path_stack[coro_id][result.level] = page_addr;
   // std::cout << "level " << (int)result.level << " " << page_addr <<
@@ -1001,7 +1003,7 @@ faa_retry:
     assert(entry_cnt + 1 < kLeafCardinality);
     dsm->write_sync(
         (char *)entry_buffer,
-        GADD(page_addr, STRUCT_OFFSET(LeafPage, records) + entry_cnt + 1),
+        GADD(page_addr, STRUCT_OFFSET(LeafPage, records) + entry_cnt * sizeof(LeafEntry)),
         sizeof(LeafEntry));
     return true;
   }
