@@ -11,6 +11,7 @@
 #include <city.h>
 #include <infiniband/verbs.h>
 #include <iostream>
+#include <ostream>
 #include <queue>
 #include <utility>
 #include <vector>
@@ -609,8 +610,10 @@ bool Tree::page_search(GlobalAddress page_addr, const Key &k,
                        SearchResult &result, CoroContext *cxt, int coro_id,
                        bool from_cache) {
   auto page_buffer = (dsm->get_rbuf(coro_id)).get_page_buffer();
-  auto header = (LeafHeader *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
+  // 无论是leaf还是internal，第一个八字节都是is_leaf
+  auto is_leaf = (uint64_t *)(page_buffer);
 
+  // std::cout << "page_addr = " << page_addr << std::endl;
   int counter = 0;
 re_read:
   if (++counter > 100) {
@@ -621,10 +624,17 @@ re_read:
 
   memset(&result, 0, sizeof(result));
 
-  //wjy 判断叶子节点方式要改
-  result.is_leaf = header->leftmost_ptr == GlobalAddress::Null();
+  // wjy 判断叶子节点方式要改
+  result.is_leaf = (*is_leaf) == 1;
 
-  result.level = header->level;
+  if (result.is_leaf) {
+    auto header = (LeafHeader *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
+    result.level = header->level;
+  } else {
+    auto header = (Header *)(page_buffer + (STRUCT_OFFSET(InternalPage, hdr)));
+    result.level = header->level;
+  }
+
   path_stack[coro_id][result.level] = page_addr;
   // std::cout << "level " << (int)result.level << " " << page_addr <<
   // std::endl;
@@ -709,7 +719,7 @@ void Tree::leaf_page_search(LeafPage *page, const Key &k,
     auto &r = page->records[i];
     if (r.key == k && r.value != kValueNull && check_val_valid(r.value)) {
       // remove delete bit and finish bit
-      result.val = r.value >> 2;
+      result.val = (r.value - 1) >> 2;
       break;
     }
   }
@@ -891,11 +901,11 @@ faa_retry:
     leafPage->records[kLeafCardinality - 1].value = (v << 2) + 1;
 
     // 将无效的 entry 移动到数组的末尾，并返回第一个无效 entry 的迭代器
-    auto it =
-        std::partition(leafPage->records, leafPage->records + kLeafCardinality,
-                       [](const LeafEntry &e) {
-                         return ((e.value & 0b01) == 1) && ((e.value & 0b10) == 0);
-                       });
+    auto it = std::partition(
+        leafPage->records, leafPage->records + kLeafCardinality,
+        [](const LeafEntry &e) {
+          return ((e.value & 0b01) == 1) && ((e.value & 0b10) == 0);
+        });
 
     // 对有效部分进行排序
     std::sort(
@@ -938,6 +948,7 @@ faa_retry:
     sibling->hdr.leafStat.highest = leafPage->hdr.leafStat.highest;
     leafPage->hdr.leafStat.highest = split_key;
 
+    leafPage->leafMeta.leafCounter = 0;
     // link
     sibling->hdr.sibling_ptr = leafPage->hdr.sibling_ptr;
     leafPage->hdr.sibling_ptr = sibling_addr;
@@ -999,12 +1010,15 @@ faa_retry:
     entry_buffer->key = k;
     // 加上finish bit
     entry_buffer->value = (v << 2) + 1;
+
+    // std::cout << "write entry key = " << entry_buffer->key << ", v = " << v
+    //           << ", value =  " << entry_buffer->value << std::endl;
     // 写远程entry
     assert(entry_cnt + 1 < kLeafCardinality);
-    dsm->write_sync(
-        (char *)entry_buffer,
-        GADD(page_addr, STRUCT_OFFSET(LeafPage, records) + entry_cnt * sizeof(LeafEntry)),
-        sizeof(LeafEntry));
+    dsm->write_sync((char *)entry_buffer,
+                    GADD(page_addr, STRUCT_OFFSET(LeafPage, records) +
+                                        entry_cnt * sizeof(LeafEntry)),
+                    sizeof(LeafEntry));
     return true;
   }
 
@@ -1019,15 +1033,15 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
 
   auto &rbuf = dsm->get_rbuf(coro_id);
   auto page_buffer = rbuf.get_page_buffer();
-  
+
   dsm->read_sync(page_buffer, page_addr, kLeafPageSize);
 
   auto page = (LeafPage *)page_buffer;
   assert(page->hdr.level == level);
   assert(page->check_consistent());
 
-  if (from_cache &&
-      (k < page->hdr.leafStat.lowest || k >= page->hdr.leafStat.highest)) { // cache is stale
+  if (from_cache && (k < page->hdr.leafStat.lowest ||
+                     k >= page->hdr.leafStat.highest)) { // cache is stale
     return false;
   }
 
@@ -1050,7 +1064,8 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   }
 
   if (update_addr) {
-    dsm->write_sync(update_addr, GADD(page_addr,(update_addr-(char*)page)), sizeof(LeafEntry));
+    dsm->write_sync(update_addr, GADD(page_addr, (update_addr - (char *)page)),
+                    sizeof(LeafEntry));
   }
   return true;
 }

@@ -119,7 +119,7 @@ constexpr Value kValueNull = 0;
 // Note: our RNICs can read 1KB data in increasing address order (but not for 4KB)
 constexpr uint32_t kInternalPageSize = 1024;
 // extern const uint32_t kLeafPageSize = 1024;
-constexpr uint64_t kLeafHeaderSize = 48;
+constexpr uint64_t kLeafHeaderSize = 40;
 
 
 __inline__ unsigned long long rdtsc(void) {

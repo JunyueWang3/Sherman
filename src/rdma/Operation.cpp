@@ -239,7 +239,7 @@ bool rdmaWriteAtomic(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
   fillSgeWr(sg, wr, source, size, lkey);
 
   if (imm == -1) {
-    wr.opcode = IBV_WR_ATOMIC_WRITE;
+    wr.opcode = IBV_WR_RDMA_WRITE;
   } else {
     wr.imm_data = imm;
     wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;

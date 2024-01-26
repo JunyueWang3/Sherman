@@ -141,7 +141,7 @@ void rdmaQueryQueuePair(ibv_qp *qp);
 // void checkDMSupported(struct ibv_context *ctx);
 
 //// specified
-bool rdmaWriteMulti(ibv_qp *qp, RdmaOpContext *ror, int k, bool isSignaled,
+bool rdmaWriteMulti(ibv_qp *qp, RdmaOpContext *roc, int k, bool isSignaled,
                     uint64_t wrID = 0);
 bool rdmaFaaRead(ibv_qp *qp, const RdmaOpContext &faa_roc,
                  const RdmaOpContext &read_roc, uint64_t add_val,

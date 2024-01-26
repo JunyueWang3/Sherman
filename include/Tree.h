@@ -172,12 +172,14 @@ public:
   }
 } __attribute__((packed));
 
-constexpr int kInternalCardinality = (kInternalPageSize - sizeof(Header) -
-                                      sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
-                                     sizeof(InternalEntry);
+constexpr int kInternalCardinality =
+    (kInternalPageSize - sizeof(Header) - sizeof(uint64_t) -
+     sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
+    sizeof(InternalEntry);
 
 class InternalPage {
 private:
+  uint64_t is_leaf;
   union {
     uint32_t crc;
     uint64_t embedding_lock;
@@ -198,6 +200,7 @@ public:
   // this is called when tree grows
   InternalPage(GlobalAddress left, const Key &key, GlobalAddress right,
                uint32_t level = 0) {
+    is_leaf = 0;
     hdr.leftmost_ptr = left;
     hdr.level = level;
     records[0].key = key;
@@ -211,6 +214,7 @@ public:
   }
 
   InternalPage(uint32_t level = 0) {
+    is_leaf = 0;
     hdr.level = level;
     records[0].ptr = GlobalAddress::Null();
 
@@ -285,15 +289,12 @@ class LeafMeta {
   friend class Tree;
 
 public:
-  LeafMeta() {
-    val = 0;
-  }
+  LeafMeta() { val = 0; }
   LeafMeta(uint64_t value) { val = value; }
   void debug() const { std::cout << "cnt=" << leafCounter << "]"; }
 } __attribute__((packed));
 
 class LeafStat {
-  Key sibling_min_key;
   Key lowest;
   Key highest;
 
@@ -303,8 +304,6 @@ class LeafStat {
 
 public:
   LeafStat() {
-    // init max key
-    sibling_min_key = kKeyMax;
     lowest = kKeyMin;
     highest = kKeyMax;
   }
@@ -326,20 +325,18 @@ public:
     level = 0;
   }
   void debug() const {
-    std::cout << "sibling_min_key=" << leafStat.sibling_min_key << ", "
-              << "sibling=" << sibling_ptr << ", "
+    std::cout << "sibling=" << sibling_ptr << ", "
               << "level=" << (int)level << ","
               << "range=[" << leafStat.lowest << " - " << leafStat.highest;
   }
-}__attribute__((packed));
+} __attribute__((packed));
 
 constexpr int kleafEntryRadix = 6;
 constexpr int kLeafCardinality = 1 << kleafEntryRadix;
-constexpr int kLeafPageSize =
-    sizeof(LeafHeader) +sizeof(LeafMeta) +sizeof(uint64_t)*2 + kLeafCardinality * sizeof(LeafEntry);
 
 class LeafPage {
 private:
+  uint64_t is_leaf;
   LeafHeader hdr;
   LeafMeta leafMeta;
   GlobalAddress shadowPtr;
@@ -348,8 +345,10 @@ private:
 
   friend class Tree;
   friend class DSM;
+
 public:
   LeafPage(uint32_t level = 0) {
+    is_leaf = 1;
     hdr.level = level;
     records[0].value = kValueNull;
   }
@@ -366,7 +365,8 @@ public:
     hdr.debug();
     leafMeta.debug();
   }
-
 };
+
+constexpr int kLeafPageSize = sizeof(LeafPage);
 
 #endif // _TREE_H_

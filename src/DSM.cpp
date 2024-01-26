@@ -247,7 +247,7 @@ void DSM::prepare_and_write_multi_sync(GlobalAddress sibling_gaddr,
   rocs[0] = {
       .source = (uint64_t)sibling_buffer,
       .dest = sibling_gaddr,
-      .size = 8,
+      .size = sizeof(LeafPage),
       .lkey = iCon->cacheLKey,
       .remoteRKey = remoteInfo[sibling_gaddr.nodeID].dsmRKey[0],
   };
@@ -265,7 +265,7 @@ void DSM::prepare_and_write_multi_sync(GlobalAddress sibling_gaddr,
   rocs[2] = {
       .source = (uint64_t)(original_buffer + (uint64_t)(STRUCT_OFFSET(LeafPage, shadowPtr))),
       .dest = GADD(original_gaddr ,(uint64_t)(STRUCT_OFFSET(LeafPage, shadowPtr))),
-      .size = sizeof(LeafPage) - sizeof(LeafHeader) - sizeof(LeafMeta),
+      .size = sizeof(LeafPage) - sizeof(LeafHeader) - sizeof(LeafMeta) -sizeof(uint64_t),
       .lkey = iCon->cacheLKey,
       .remoteRKey = remoteInfo[original_gaddr.nodeID].dsmRKey[0],
   };
@@ -517,9 +517,9 @@ uint64_t DSM::faa_read_sync(RdmaOpContext &faa_roc, RdmaOpContext &read_roc,
     pollWithCQ(iCon->cq, 1, &wc);
     if (wc.opcode == IBV_WC_RDMA_READ) {
       // 获取远程地址的旧值
-      old_value = swap_endian(*(uint64_t *)faa_roc.source); // 获取旧值（大小端转换）
-      std::cout << "FAA Read operation completed. Old value: "<<  std::hex << old_value
-                << std::endl;
+      old_value = *(uint64_t *)faa_roc.source; // 获取旧值
+      // std::cout << "FAA Read operation completed. Old value: "<<  std::hex << old_value
+      //           << std::endl;
     } else {
       std::cerr << "Unexpected completion opcode." << std::endl;
     }

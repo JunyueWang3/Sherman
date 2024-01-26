@@ -51,7 +51,7 @@ public:
 
     // printf("set buffer %p\n", buffer);
 
-    kPageSize = std::max((uint32_t)1080, kInternalPageSize);
+    kPageSize = std::max((uint32_t)1096, kInternalPageSize);
     this->buffer = buffer;
     faa_buffer = (uint64_t *)buffer;
     cas_buffer = (uint64_t *)buffer + sizeof(uint64_t) * kFaaBufferCnt;
