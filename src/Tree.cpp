@@ -1270,7 +1270,7 @@ void Tree::print_rtt_time() {
             << "us" << std::endl;
   std::cout << "split time = " << total_split / (1000 * thread_num) << "us"
             << std::endl;
-  std::cout << "retry cnt = " << total_retry / (1000 * thread_num) << std::endl;
+  std::cout << "retry cnt = " << total_retry / thread_num << std::endl;
 }
 
 void Tree::clear_rtt_time() {

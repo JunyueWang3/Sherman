@@ -18,9 +18,9 @@ const int kCoroCnt = 3;
 int kReadRatio;
 int kThreadCount;
 int kNodeCount;
-uint64_t kKeySpace = 10000000;
+uint64_t kKeySpace = 100000000;
 double kWarmRatio = 1.0;
-double zipfan = 0;
+double zipfan = 0.99;
 
 //////////////////// workload parameters /////////////////////
 
@@ -260,8 +260,9 @@ int main(int argc, char *argv[]) {
 
   clock_gettime(CLOCK_REALTIME, &s);
   while (true) {
-
+    tree->clear_rtt_time();
     sleep(2);
+    tree->print_rtt_time();
     clock_gettime(CLOCK_REALTIME, &e);
     int microseconds = (e.tv_sec - s.tv_sec) * 1000000 +
                        (double)(e.tv_nsec - s.tv_nsec) / 1000;
