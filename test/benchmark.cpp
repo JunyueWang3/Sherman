@@ -18,13 +18,8 @@ const int kCoroCnt = 3;
 int kReadRatio;
 int kThreadCount;
 int kNodeCount;
-<<<<<<< HEAD
-uint64_t kKeySpace = 64 * define::MB;
-double kWarmRatio = 0.8;
-=======
 uint64_t kKeySpace = 10000000;
 double kWarmRatio = 1.0;
->>>>>>> 1b2be2d... add rtt test
 double zipfan = 0;
 
 //////////////////// workload parameters /////////////////////
