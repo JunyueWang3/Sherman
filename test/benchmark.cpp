@@ -18,8 +18,13 @@ const int kCoroCnt = 3;
 int kReadRatio;
 int kThreadCount;
 int kNodeCount;
+<<<<<<< HEAD
 uint64_t kKeySpace = 64 * define::MB;
 double kWarmRatio = 0.8;
+=======
+uint64_t kKeySpace = 10000000;
+double kWarmRatio = 1.0;
+>>>>>>> 1b2be2d... add rtt test
 double zipfan = 0;
 
 //////////////////// workload parameters /////////////////////
@@ -95,6 +100,7 @@ void thread_run(int id) {
 
   if (id == 0) {
     bench_timer.begin();
+    tree->clear_rtt_time();
   }
 
   uint64_t end_warm_key = kWarmRatio * kKeySpace;
@@ -113,7 +119,10 @@ void thread_run(int id) {
     dsm->barrier("warm_finish");
 
     uint64_t ns = bench_timer.end();
-    printf("warmup time %lds\n", ns / 1000 / 1000 / 1000);
+    printf("warmup time %ldus\n", ns / 1000);
+
+    tree->print_rtt_time();
+    tree->clear_rtt_time();
 
     tree->index_cache_statistics();
     tree->clear_statistics();
@@ -234,7 +243,7 @@ int main(int argc, char *argv[]) {
   tree = new Tree(dsm);
 
   if (dsm->getMyNodeID() == 0) {
-    for (uint64_t i = 1; i < 1024000; ++i) {
+    for (uint64_t i = 1; i < 102400; ++i) {
       tree->insert(to_key(i), i * 2);
     }
   }

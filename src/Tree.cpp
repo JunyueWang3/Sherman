@@ -5,8 +5,11 @@
 
 #include <algorithm>
 #include <city.h>
+#include <cstring>
 #include <iostream>
+#include <numeric>
 #include <queue>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -15,6 +18,9 @@ bool enter_debug = false;
 uint64_t cache_miss[MAX_APP_THREAD][8];
 uint64_t cache_hit[MAX_APP_THREAD][8];
 uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+
+uint64_t rtt_time[MAX_APP_THREAD];
+uint64_t page_search_time[MAX_APP_THREAD];
 
 thread_local CoroCall Tree::worker[define::kMaxCoro];
 thread_local CoroCall Tree::master;
@@ -468,7 +474,7 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
   result.clear();
   leaves.clear();
   index_cache->search_range_from_cache(from, to, result);
-  
+
   // FIXME: here, we assume all innernal nodes are cached in compute node
   if (result.empty()) {
     return 0;
@@ -593,6 +599,11 @@ next:
 bool Tree::page_search(GlobalAddress page_addr, const Key &k,
                        SearchResult &result, CoroContext *cxt, int coro_id,
                        bool from_cache) {
+  timespec s, e;
+
+  // rtt lock and read
+  clock_gettime(CLOCK_REALTIME, &s);
+
   auto page_buffer = (dsm->get_rbuf(coro_id)).get_page_buffer();
   auto header = (Header *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
 
@@ -610,6 +621,11 @@ re_read:
   path_stack[coro_id][result.level] = page_addr;
   // std::cout << "level " << (int)result.level << " " << page_addr <<
   // std::endl;
+
+  clock_gettime(CLOCK_REALTIME, &e);
+  int nanoseconds =
+      (e.tv_sec - s.tv_sec) * 1000000000 + (double)(e.tv_nsec - s.tv_nsec);
+  page_search_time[dsm->getMyThreadID()] += nanoseconds;
 
   if (result.is_leaf) {
     auto page = (LeafPage *)page_buffer;
@@ -848,8 +864,17 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   auto tag = dsm->getThreadTag();
   assert(tag != 0);
 
+  timespec s, e;
+
+  // rtt lock and read
+  clock_gettime(CLOCK_REALTIME, &s);
+
   lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
                      lock_addr, tag, cxt, coro_id);
+  clock_gettime(CLOCK_REALTIME, &e);
+  int nanoseconds =
+      (e.tv_sec - s.tv_sec) * 1000000000 + (double)(e.tv_nsec - s.tv_nsec);
+  rtt_time[dsm->getMyThreadID()] += nanoseconds;
 
   auto page = (LeafPage *)page_buffer;
 
@@ -858,13 +883,26 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
   if (from_cache &&
       (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
+    // rtt unlock
+    clock_gettime(CLOCK_REALTIME, &s);
     this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+
+    clock_gettime(CLOCK_REALTIME, &e);
+    int nanoseconds =
+        (e.tv_sec - s.tv_sec) * 1000000000 + (double)(e.tv_nsec - s.tv_nsec);
+    rtt_time[dsm->getMyThreadID()] += nanoseconds;
     return false;
   }
 
   if (k >= page->hdr.highest) {
-
+    // rtt unlock
+    clock_gettime(CLOCK_REALTIME, &s);
     this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+
+    clock_gettime(CLOCK_REALTIME, &e);
+    int nanoseconds =
+        (e.tv_sec - s.tv_sec) * 1000000000 + (double)(e.tv_nsec - s.tv_nsec);
+    rtt_time[dsm->getMyThreadID()] += nanoseconds;
     assert(page->hdr.sibling_ptr != GlobalAddress::Null());
     this->leaf_page_store(page->hdr.sibling_ptr, k, v, root, level, cxt,
                           coro_id);
@@ -914,10 +952,17 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   bool need_split = cnt == kLeafCardinality;
   if (!need_split) {
     assert(update_addr);
+    // rtt update and unlock
+    clock_gettime(CLOCK_REALTIME, &s);
+
     write_page_and_unlock(
         update_addr, GADD(page_addr, (update_addr - (char *)page)),
         sizeof(LeafEntry), cas_buffer, lock_addr, tag, cxt, coro_id, false);
 
+    clock_gettime(CLOCK_REALTIME, &e);
+    int nanoseconds =
+        (e.tv_sec - s.tv_sec) * 1000000000 + (double)(e.tv_nsec - s.tv_nsec);
+    rtt_time[dsm->getMyThreadID()] += nanoseconds;
     return true;
   } else {
     std::sort(
@@ -964,8 +1009,13 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
   page->set_consistent();
 
+  clock_gettime(CLOCK_REALTIME, &s);
   write_page_and_unlock(page_buffer, page_addr, kLeafPageSize, cas_buffer,
                         lock_addr, tag, cxt, coro_id, need_split);
+  clock_gettime(CLOCK_REALTIME, &e);
+  nanoseconds =
+      (e.tv_sec - s.tv_sec) * 1000000000 + (double)(e.tv_nsec - s.tv_nsec);
+  rtt_time[dsm->getMyThreadID()] += nanoseconds;
 
   if (!need_split)
     return true;
@@ -1175,6 +1225,28 @@ inline void Tree::releases_local_lock(GlobalAddress lock_addr) {
 void Tree::index_cache_statistics() {
   index_cache->statistics();
   index_cache->bench();
+}
+
+void Tree::print_rtt_time() {
+  uint64_t total_rtt = 0;
+  uint64_t total_page_search = 0;
+  uint64_t thread_num;
+  for (int i = 0; i < MAX_APP_THREAD; i++) {
+    total_rtt += rtt_time[i];
+    total_page_search += page_search_time[i];
+    if (rtt_time[i] == 0) {
+      thread_num = i;
+      break;
+    }
+  }
+  std::cout << "thread num = " << thread_num << std::endl;
+  std::cout << "rdam rtt time = " << total_rtt / (1000*thread_num) << "us" << std::endl;
+  std::cout << "page search time = " << total_page_search / (1000*thread_num) << "us" << std::endl;
+}
+
+void Tree::clear_rtt_time() {
+  memset(rtt_time, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(page_search_time, 0, sizeof(uint64_t) * MAX_APP_THREAD);
 }
 
 void Tree::clear_statistics() {

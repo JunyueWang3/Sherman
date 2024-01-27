@@ -1,6 +1,8 @@
 #include "Rdma.h"
 
 int pollWithCQ(ibv_cq *cq, int pollNumber, struct ibv_wc *wc) {
+  
+  
   int count = 0;
 
   do {
@@ -23,7 +25,7 @@ int pollWithCQ(ibv_cq *cq, int pollNumber, struct ibv_wc *wc) {
     sleep(5);
     return -1;
   }
-
+  
   return count;
 }
 

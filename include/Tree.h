@@ -62,6 +62,8 @@ public:
   void index_cache_statistics();
   void clear_statistics();
 
+  void print_rtt_time();
+  void clear_rtt_time();
 private:
   DSM *dsm;
   uint64_t tree_id;
