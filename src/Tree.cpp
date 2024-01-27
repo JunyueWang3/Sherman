@@ -719,7 +719,7 @@ void Tree::leaf_page_search(LeafPage *page, const Key &k,
     auto &r = page->records[i];
     if (r.key == k && r.value != kValueNull && check_val_valid(r.value)) {
       // remove delete bit and finish bit
-      result.val = (r.value - 1) >> 2;
+      result.val = r.value >> 2;
       break;
     }
   }
@@ -934,8 +934,8 @@ faa_retry:
 
     int m = validCount / 2;
     split_key = leafPage->records[m].key;
-    assert(split_key > leafPage->hdr.leafStat.lowest);
-    assert(split_key < leafPage->hdr.leafStat.highest);
+    assert(split_key >= leafPage->hdr.leafStat.lowest);
+    assert(split_key <= leafPage->hdr.leafStat.highest);
 
     for (int i = m; i < validCount; ++i) { // move
       sibling->records[i - m].key = leafPage->records[i].key;
@@ -947,8 +947,9 @@ faa_retry:
     sibling->hdr.leafStat.lowest = split_key;
     sibling->hdr.leafStat.highest = leafPage->hdr.leafStat.highest;
     leafPage->hdr.leafStat.highest = split_key;
-
-    leafPage->leafMeta.leafCounter = 0;
+    
+    sibling->leafMeta.leafCounter = validCount-m;
+    leafPage->leafMeta.leafCounter = m;
     // link
     sibling->hdr.sibling_ptr = leafPage->hdr.sibling_ptr;
     leafPage->hdr.sibling_ptr = sibling_addr;

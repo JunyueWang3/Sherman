@@ -60,7 +60,6 @@ int main() {
   config.machineNR = 1;
   DSM *dsm = DSM::getInstance(config);
 
-  
   dsm->registerThread();
 
   auto tree = new Tree(dsm);
@@ -72,7 +71,7 @@ int main() {
       ;
   }
 
-  uint64_t key_nums = 10240000;
+  uint64_t key_nums = 10000000;
 
   timespec s, e;
 
@@ -85,10 +84,19 @@ int main() {
     // auto res = tree->search(i, v);
     // if (v != i * 2) {
     //   assert(res && v == i * 2);
-    //   std::cout << "search result:  k = " << i << ", v = " << res << " v: " << v
+    //   std::cout << "search result:  k = " << i << ", v = " << res << " v: "
+    //   << v
     //             << std::endl;
     // }
   }
+
+  // for (uint64_t i = 1; i <= key_nums; ++i) {
+  //   auto res = tree->search(i, v);
+  //   if (v != i * 2) {
+  //     std::cout << "search result:  k = " << i << ", v = " << v << std::endl;
+  //     assert(res && v == i * 2);
+  //   }
+  // }
 
   clock_gettime(CLOCK_REALTIME, &e);
   int microseconds =
@@ -107,7 +115,8 @@ int main() {
 
   double per_node_tp = key_nums * 1.0 / microseconds;
 
-  printf("%d, time %d us , throughput %.4f Mops\n", dsm->getMyNodeID(), microseconds, per_node_tp);
+  printf("%d, time %d us , throughput %.4f Mops\n", dsm->getMyNodeID(),
+         microseconds, per_node_tp);
   // for (uint64_t i = 1; i < 128; ++i) {
   //   auto res = tree->search(i, v);
   //   std::cout << "search result:  " << res << " v: " << v << std::endl;

@@ -329,7 +329,7 @@ public:
               << "level=" << (int)level << ","
               << "range=[" << leafStat.lowest << " - " << leafStat.highest;
   }
-} __attribute__((packed));
+} ;
 
 constexpr int kleafEntryRadix = 6;
 constexpr int kLeafCardinality = 1 << kleafEntryRadix;

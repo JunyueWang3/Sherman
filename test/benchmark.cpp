@@ -18,8 +18,8 @@ const int kCoroCnt = 3;
 int kReadRatio;
 int kThreadCount;
 int kNodeCount;
-uint64_t kKeySpace = 64 * define::MB;
-double kWarmRatio = 0.8;
+uint64_t kKeySpace = 10000000;
+double kWarmRatio = 1.0;
 double zipfan = 0.99;
 
 //////////////////// workload parameters /////////////////////
@@ -113,7 +113,7 @@ void thread_run(int id) {
     dsm->barrier("warm_finish");
 
     uint64_t ns = bench_timer.end();
-    printf("warmup time %lds\n", ns / 1000 / 1000 / 1000);
+    printf("warmup time %ld us \n", ns / 1000);
 
     tree->index_cache_statistics();
     tree->clear_statistics();
