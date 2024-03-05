@@ -1,14 +1,15 @@
+#include "Common.h"
 #include "Timer.h"
 #include "Tree.h"
 #include "zipf.h"
 
 #include <city.h>
+#include <cstdlib>
 #include <stdlib.h>
 #include <thread>
 #include <time.h>
 #include <unistd.h>
 #include <vector>
-
 
 //////////////////// workload parameters /////////////////////
 
@@ -18,22 +19,26 @@ const int kCoroCnt = 3;
 int kReadRatio;
 int kThreadCount;
 int kNodeCount;
-uint64_t kKeySpace = 100000000;
-double kWarmRatio = 1.0;
-double zipfan = 0.99;
+int kOperType = 0;
+
+uint64_t kKeySpace = 125000000;
+uint64_t operNum = 10000000;
+uint64_t operPerTh = 0;
+double kWarmRatio = 0.8;
+double zipfan = 0;
+uint64_t scan_size = 100;
 
 //////////////////// workload parameters /////////////////////
 
-
 extern uint64_t cache_miss[MAX_APP_THREAD][8];
 extern uint64_t cache_hit[MAX_APP_THREAD][8];
-
-
 
 std::thread th[MAX_APP_THREAD];
 uint64_t tp[MAX_APP_THREAD][8];
 
 extern uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+extern uint64_t time_per_th[MAX_APP_THREAD];
+
 uint64_t latency_th_all[LATENCY_WINDOWS];
 
 Tree *tree;
@@ -81,6 +86,8 @@ RequstGen *coro_func(int coro_id, DSM *dsm, int id) {
 
 Timer bench_timer;
 std::atomic<int64_t> warmup_cnt{0};
+std::atomic<int64_t> finish_oper_cnt{0};
+
 std::atomic_bool ready{false};
 void thread_run(int id) {
 
@@ -140,6 +147,7 @@ void thread_run(int id) {
   mehcached_zipf_init(&state, kKeySpace, zipfan,
                       (rdtsc() & (0x0000ffffffffffffull)) ^ id);
 
+  Timer total_timer;
   Timer timer;
   while (true) {
 
@@ -147,13 +155,30 @@ void thread_run(int id) {
     uint64_t key = to_key(dis);
 
     Value v;
+    Value *buffer = new Value[110];
     timer.begin();
+    total_timer.begin();
 
-    if (rand_r(&seed) % 100 < kReadRatio) { // GET
-      tree->search(key, v);
-    } else {
-      v = 12;
-      tree->insert(key, v);
+    switch (kOperType) {
+    case 0:
+      // put and get
+      if (rand_r(&seed) % 100 < kReadRatio) { // GET
+        tree->search(key, v);
+      } else {
+        v = 12;
+        tree->insert(key, v);
+      }
+      break;
+    case 1:
+      // delete
+      tree->del(key);
+      break;
+    case 2:
+      // scan
+      tree->range_query_from(key, scan_size, buffer);
+      break;
+    default:
+      break;
     }
 
     auto us_10 = timer.end() / 100;
@@ -162,24 +187,31 @@ void thread_run(int id) {
     }
     latency[id][us_10]++;
 
-    tp[id][0]++;
+    if (++tp[id][0] == operPerTh) {
+      time_per_th[id] = total_timer.end() / 1000;
+      finish_oper_cnt.fetch_add(1);
+      break;
+    }
   }
 #endif
-
 }
 
 void parse_args(int argc, char *argv[]) {
-  if (argc != 4) {
-    printf("Usage: ./benchmark kNodeCount kReadRatio kThreadCount\n");
+  if (argc != 6) {
+    printf("Usage: ./benchmark kNodeCount kReadRatio kThreadCount kOperType "
+           "zipfan\n");
     exit(-1);
   }
 
   kNodeCount = atoi(argv[1]);
   kReadRatio = atoi(argv[2]);
   kThreadCount = atoi(argv[3]);
+  kOperType = atoi(argv[4]);
+  zipfan = atoi(argv[5]) / 100.0;
 
-  printf("kNodeCount %d, kReadRatio %d, kThreadCount %d\n", kNodeCount,
-         kReadRatio, kThreadCount);
+  printf("kNodeCount %d, kReadRatio %d, kThreadCount %d\n, kOperType "
+         "%d zipfan %f",
+         kNodeCount, kReadRatio, kThreadCount, kOperType, zipfan);
 }
 
 void cal_latency() {
@@ -237,6 +269,8 @@ int main(int argc, char *argv[]) {
   dsm->registerThread();
   tree = new Tree(dsm);
 
+  operPerTh = operNum / kThreadCount;
+
   if (dsm->getMyNodeID() == 0) {
     for (uint64_t i = 1; i < 102400; ++i) {
       tree->insert(to_key(i), i * 2);
@@ -259,44 +293,80 @@ int main(int argc, char *argv[]) {
   int count = 0;
 
   clock_gettime(CLOCK_REALTIME, &s);
-  while (true) {
-    tree->clear_rtt_time();
-    sleep(2);
-    tree->print_rtt_time();
-    clock_gettime(CLOCK_REALTIME, &e);
-    int microseconds = (e.tv_sec - s.tv_sec) * 1000000 +
-                       (double)(e.tv_nsec - s.tv_nsec) / 1000;
+  tree->clear_rtt_time();
+  while (finish_oper_cnt.load() != kThreadCount)
+    ;
+  
+  tree->print_rtt_time();
+  clock_gettime(CLOCK_REALTIME, &e);
+  int microseconds =
+      (e.tv_sec - s.tv_sec) * 1000000 + (double)(e.tv_nsec - s.tv_nsec) / 1000;
 
-    uint64_t all_tp = 0;
-    for (int i = 0; i < kThreadCount; ++i) {
-      all_tp += tp[i][0];
-    }
-    uint64_t cap = all_tp - pre_tp;
-    pre_tp = all_tp;
-
-    uint64_t all = 0;
-    uint64_t hit = 0;
-    for (int i = 0; i < MAX_APP_THREAD; ++i) {
-      all += (cache_hit[i][0] + cache_miss[i][0]);
-      hit += cache_hit[i][0];
-    }
-
-    clock_gettime(CLOCK_REALTIME, &s);
-
-    if (++count % 3 == 0 && dsm->getMyNodeID() == 0) {
-      cal_latency();
-    }
-
-    double per_node_tp = cap * 1.0 / microseconds;
-    uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 1000));
-
-    printf("%d, throughput %.4f\n", dsm->getMyNodeID(), per_node_tp);
-
-    if (dsm->getMyNodeID() == 0) {
-      printf("cluster throughput %.3f\n", cluster_tp / 1000.0);
-      printf("cache hit rate: %lf\n", hit * 1.0 / all);
-    }
+  printf("oper finished, cost %d us\n",microseconds);
+  uint64_t all = 0;
+  uint64_t hit = 0;
+  for (int i = 0; i < MAX_APP_THREAD; ++i) {
+    all += (cache_hit[i][0] + cache_miss[i][0]);
+    hit += cache_hit[i][0];
   }
 
+  if (dsm->getMyNodeID() == 0) {
+    cal_latency();
+  }
+
+  double per_node_tp = operNum * 1.0 / microseconds;
+  uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 1000));
+
+  printf("%d, throughput %.4f\n", dsm->getMyNodeID(), per_node_tp);
+
+  if (dsm->getMyNodeID() == 0) {
+    printf("cluster throughput %.3f\n", cluster_tp / 1000.0);
+    printf("cache hit rate: %lf\n", hit * 1.0 / all);
+  }
+
+  while (true)
+    ;
+  /*
+   clock_gettime(CLOCK_REALTIME, &s);
+
+   while (true) {
+     tree->clear_rtt_time();
+     sleep(2);
+     tree->print_rtt_time();
+     clock_gettime(CLOCK_REALTIME, &e);
+     int microseconds = (e.tv_sec - s.tv_sec) * 1000000 +
+                        (double)(e.tv_nsec - s.tv_nsec) / 1000;
+
+     uint64_t all_tp = 0;
+     for (int i = 0; i < kThreadCount; ++i) {
+       all_tp += tp[i][0];
+     }
+     uint64_t cap = all_tp - pre_tp;
+     pre_tp = all_tp;
+
+     uint64_t all = 0;
+     uint64_t hit = 0;
+     for (int i = 0; i < MAX_APP_THREAD; ++i) {
+       all += (cache_hit[i][0] + cache_miss[i][0]);
+       hit += cache_hit[i][0];
+     }
+
+     clock_gettime(CLOCK_REALTIME, &s);
+
+     if (++count % 3 == 0 && dsm->getMyNodeID() == 0) {
+       cal_latency();
+     }
+
+     double per_node_tp = cap * 1.0 / microseconds;
+     uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 1000));
+
+     printf("%d, throughput %.4f\n", dsm->getMyNodeID(), per_node_tp);
+
+     if (dsm->getMyNodeID() == 0) {
+       printf("cluster throughput %.3f\n", cluster_tp / 1000.0);
+       printf("cache hit rate: %lf\n", hit * 1.0 / all);
+     }
+   }
+   */
   return 0;
 }

@@ -18,6 +18,7 @@ bool enter_debug = false;
 uint64_t cache_miss[MAX_APP_THREAD][8];
 uint64_t cache_hit[MAX_APP_THREAD][8];
 uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+uint64_t time_per_th[MAX_APP_THREAD];
 
 uint64_t rtt_time[MAX_APP_THREAD];
 uint64_t page_search_time[MAX_APP_THREAD];
@@ -465,6 +466,93 @@ next:
                                                 : result.next_level;
     goto next;
   }
+}
+
+uint64_t Tree::range_query_from(const Key &from, uint64_t up_to, Value *value_buffer,
+                           CoroContext *cxt, int coro_id) {
+
+  const int kParaFetch = 32;
+  thread_local std::vector<InternalPage *> result;
+  thread_local std::vector<GlobalAddress> leaves;
+
+  result.clear();
+  leaves.clear();
+
+  int amp = 1;
+  while (result.size() * kInternalCardinality * kLeafCardinality < up_to * 3 && amp < 100000ull) {
+    amp *= 10;
+    index_cache->search_range_from_cache(from, from + up_to * amp, result);
+  }
+  
+
+  // FIXME: here, we assume all innernal nodes are cached in compute node
+  if (result.empty()) {
+    return 0;
+  }
+
+  uint64_t counter = 0;
+  for (auto page : result) {
+    auto cnt = page->hdr.last_index + 1;
+    auto addr = page->hdr.leftmost_ptr;
+
+    // [from, to]
+    // [lowest, page->records[0].key);
+    bool no_fetch = from > page->records[0].key;
+    if (!no_fetch) {
+      leaves.push_back(addr);
+    }
+    for (int i = 1; i < cnt; ++i) {
+      no_fetch = from > page->records[i].key || leaves.size() * kLeafCardinality >= up_to * 2;
+      if (!no_fetch) {
+        leaves.push_back(page->records[i - 1].ptr);
+      }
+    }
+
+    no_fetch = from > page->hdr.highest || leaves.size() * kLeafCardinality >= up_to * 2;
+    if (!no_fetch) {
+      leaves.push_back(page->records[cnt - 1].ptr);
+    }
+  }
+
+  int cq_cnt = 0;
+  char *range_buffer = (dsm->get_rbuf(coro_id)).get_range_buffer();
+  for (size_t i = 0; i < leaves.size(); ++i) {
+    if (i > 0 && i % kParaFetch == 0) {
+      dsm->poll_rdma_cq(kParaFetch);
+      cq_cnt -= kParaFetch;
+      for (int k = 0; k < kParaFetch; ++k) {
+        auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+        for (int i = 0; i < kLeafCardinality; ++i) {
+          auto &r = page->records[i];
+          if (r.value != kValueNull && r.f_version == r.r_version) {
+            if (r.key >= from && counter < up_to) {
+              value_buffer[counter++] = r.value;
+            }
+          }
+        }
+      }
+    }
+    dsm->read(range_buffer + kLeafPageSize * (i % kParaFetch), leaves[i],
+              kLeafPageSize, true);
+    cq_cnt++;
+  }
+
+  if (cq_cnt != 0) {
+    dsm->poll_rdma_cq(cq_cnt);
+    for (int k = 0; k < cq_cnt; ++k) {
+      auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+      for (int i = 0; i < kLeafCardinality; ++i) {
+        auto &r = page->records[i];
+        if (r.value != kValueNull && r.f_version == r.r_version) {
+          if (counter < up_to) {
+            value_buffer[counter++] = r.value;
+          }
+        }
+      }
+    }
+  }
+
+  return counter;
 }
 
 uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
@@ -1252,7 +1340,7 @@ void Tree::print_rtt_time() {
   uint64_t total_page_search = 0;
   uint64_t total_split = 0;
   uint64_t total_retry = 0;
-  uint64_t thread_num;
+  uint64_t thread_num = MAX_APP_THREAD;
   for (int i = 0; i < MAX_APP_THREAD; i++) {
     total_rtt += rtt_time[i];
     total_page_search += page_search_time[i];
@@ -1262,6 +1350,10 @@ void Tree::print_rtt_time() {
       thread_num = i;
       break;
     }
+  }
+  if(thread_num == 0){
+    std::cout << "thread num = " << thread_num << std::endl;
+    return;
   }
   std::cout << "thread num = " << thread_num << std::endl;
   std::cout << "rdam rtt time = " << total_rtt / (1000 * thread_num) << "us"

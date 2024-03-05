@@ -53,6 +53,9 @@ public:
   uint64_t range_query(const Key &from, const Key &to, Value *buffer,
                        CoroContext *cxt = nullptr, int coro_id = 0);
 
+  uint64_t range_query_from(const Key &from, uint64_t up_to, Value *buffer,
+                       CoroContext *cxt = nullptr, int coro_id = 0);
+
   void print_and_check_tree(CoroContext *cxt = nullptr, int coro_id = 0);
 
   void run_coroutine(CoroFunc func, int id, int coro_cnt);
